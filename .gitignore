@@ -1,0 +1,18 @@
+# Build artifacts
+launcher/target/
+llama-cpp/build/
+
+# Models (downloaded separately)
+models/*.gguf
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log
