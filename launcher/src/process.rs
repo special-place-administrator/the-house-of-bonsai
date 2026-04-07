@@ -257,6 +257,10 @@ impl ProcessManager {
         };
 
         let mut cmd = Command::new(&self.server_exe);
+        // Set working directory to where llama-server.exe lives so it finds its DLLs
+        if let Some(exe_dir) = self.server_exe.parent() {
+            cmd.current_dir(exe_dir);
+        }
         cmd.args(&args)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
