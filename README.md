@@ -1,3 +1,5 @@
+![Bonsai](./logo.jpg)
+
 # The House of Bonsai
 
 > Run [PrismML's Bonsai-8B](https://huggingface.co/prism-ml/Bonsai-8B-gguf) — a 1-bit 8B language model — with full CUDA GPU acceleration and a native desktop launcher.
