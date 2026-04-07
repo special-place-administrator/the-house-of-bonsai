@@ -16,3 +16,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Release staging
+release/
+
+# Temp scripts
+test-bonsai.bat
