@@ -97,10 +97,16 @@ impl ProcessManager {
         // 2. In the build output directory (development layout)
         let server_exe = if let Ok(exe_path) = std::env::current_exe() {
             let exe_dir = exe_path.parent().unwrap_or(Path::new("."));
-            let portable = exe_dir.join("llama-server.exe");
-            if portable.exists() {
-                portable
+            // 1. bin/ subfolder next to launcher (clean release layout)
+            let in_bin = exe_dir.join("bin").join("llama-server.exe");
+            // 2. Same directory as launcher (flat layout)
+            let flat = exe_dir.join("llama-server.exe");
+            if in_bin.exists() {
+                in_bin
+            } else if flat.exists() {
+                flat
             } else {
+                // 3. Development build directory
                 repo_root.join("build").join("bin").join("llama-server.exe")
             }
         } else {
@@ -268,6 +274,42 @@ impl ProcessManager {
         // Set TURBO_LAYER_ADAPTIVE env
         if slot_config.turbo_layer_adaptive != "off" {
             cmd.env("TURBO_LAYER_ADAPTIVE", &slot_config.turbo_layer_adaptive);
+        }
+
+        // Ensure CUDA and Vulkan runtime DLLs can be found by adding their
+        // bin directories to the child process PATH
+        #[cfg(target_os = "windows")]
+        {
+            let mut path_additions = Vec::new();
+            // CUDA runtime path — check both bin/ and bin/x64/ (CUDA 13+ layout)
+            if let Ok(cuda_path) = std::env::var("CUDA_PATH") {
+                let bin_x64 = format!("{}\\bin\\x64", cuda_path);
+                let bin = format!("{}\\bin", cuda_path);
+                if PathBuf::from(&bin_x64).is_dir() { path_additions.push(bin_x64); }
+                if PathBuf::from(&bin).is_dir() { path_additions.push(bin); }
+            } else {
+                let cuda_default = PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA");
+                if cuda_default.is_dir() {
+                    if let Ok(entries) = std::fs::read_dir(&cuda_default) {
+                        for entry in entries.flatten() {
+                            let bin_x64 = entry.path().join("bin").join("x64");
+                            let bin = entry.path().join("bin");
+                            if bin_x64.is_dir() { path_additions.push(bin_x64.to_string_lossy().to_string()); }
+                            if bin.is_dir() { path_additions.push(bin.to_string_lossy().to_string()); }
+                            break;
+                        }
+                    }
+                }
+            }
+            // Vulkan runtime path
+            if let Ok(vk_sdk) = std::env::var("VULKAN_SDK") {
+                path_additions.push(format!("{}\\Bin", vk_sdk));
+            }
+            if !path_additions.is_empty() {
+                let current_path = std::env::var("PATH").unwrap_or_default();
+                let new_path = format!("{};{}", path_additions.join(";"), current_path);
+                cmd.env("PATH", new_path);
+            }
         }
 
         #[cfg(target_os = "windows")]
