@@ -260,6 +260,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "bonsai-launcher"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "clap",
+ "ctrlc",
+ "dioxus",
+ "dirs",
+ "futures",
+ "libc",
+ "open",
+ "reqwest",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "urlencoding",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4828,30 +4852,6 @@ dependencies = [
  "sha1",
  "thiserror 2.0.18",
  "utf-8",
-]
-
-[[package]]
-name = "turboquant-launcher"
-version = "0.1.0"
-dependencies = [
- "axum",
- "chrono",
- "clap",
- "ctrlc",
- "dioxus",
- "dirs",
- "futures",
- "libc",
- "open",
- "reqwest",
- "rfd",
- "serde",
- "serde_json",
- "tokio",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "urlencoding",
 ]
 
 [[package]]

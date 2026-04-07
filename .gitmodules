@@ -1,6 +1,6 @@
 [submodule "llama-cpp"]
 	path = llama-cpp
-	url = https://github.com/spiritbuun/llama-cpp-turboquant-cuda.git
+	url = https://github.com/special-place-administrator/llama-cpp-bonsai.git
 [submodule "prism-mcp"]
 	path = prism-mcp
 	url = https://github.com/special-place-administrator/prism-mcp.git

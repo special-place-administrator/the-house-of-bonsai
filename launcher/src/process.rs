@@ -93,20 +93,22 @@ const MAX_LOG_LINES: usize = 5000;
 impl ProcessManager {
     pub fn new(repo_root: &Path) -> Self {
         // Look for llama-server.exe in multiple locations:
-        // 1. Next to the launcher exe (release/portable layout)
-        // 2. In the build output directory (development layout)
+        // 1. system/ subfolder next to launcher (package layout)
+        // 2. bin/ subfolder next to launcher (legacy layout)
+        // 3. Same directory as launcher (flat layout)
+        // 4. Development build directory
         let server_exe = if let Ok(exe_path) = std::env::current_exe() {
             let exe_dir = exe_path.parent().unwrap_or(Path::new("."));
-            // 1. bin/ subfolder next to launcher (clean release layout)
+            let in_system = exe_dir.join("system").join("llama-server.exe");
             let in_bin = exe_dir.join("bin").join("llama-server.exe");
-            // 2. Same directory as launcher (flat layout)
             let flat = exe_dir.join("llama-server.exe");
-            if in_bin.exists() {
+            if in_system.exists() {
+                in_system
+            } else if in_bin.exists() {
                 in_bin
             } else if flat.exists() {
                 flat
             } else {
-                // 3. Development build directory
                 repo_root.join("build").join("bin").join("llama-server.exe")
             }
         } else {

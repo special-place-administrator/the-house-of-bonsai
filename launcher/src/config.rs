@@ -262,7 +262,7 @@ impl LauncherConfig {
     pub fn config_dir() -> PathBuf {
         let local_app_data = dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from("."));
-        local_app_data.join("LlamaTurboQuantLauncher")
+        local_app_data.join("BonsaiLauncher")
     }
 
     pub fn config_path() -> PathBuf {
@@ -299,7 +299,7 @@ impl LauncherConfig {
             if let Ok(legacy) = serde_json::from_str::<LegacyFields>(&content) {
                 let slot = ModelSlot {
                     model_path: legacy.model_path,
-                    alias: if legacy.alias.is_empty() { "TurboQuant Local".into() } else { legacy.alias },
+                    alias: if legacy.alias.is_empty() { "Bonsai Local".into() } else { legacy.alias },
                     port: legacy.port,
                     embedding_mode: false,
                     context_size: legacy.context_size,

@@ -7,16 +7,27 @@ REM  Builds llama-server with all available GPU backends + Rust launcher
 REM ==========================================================================
 
 REM --- Visual Studio ---
+set VS_ROOT=
 if exist "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" (
-    call "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+    set VS_ROOT=C:\Program Files\Microsoft Visual Studio\18\Community
 ) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat" (
-    call "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+    set VS_ROOT=C:\Program Files\Microsoft Visual Studio\2022\Community
 ) else (
     echo ERROR: Visual Studio 2026 or 2022 not found
     exit /b 1
 )
+call "%VS_ROOT%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
 
-set PROJECT_ROOT=E:\project\the-house-of-bonsai
+REM --- Ensure VS-bundled CMake is on PATH (takes priority over Python cmake) ---
+set "VS_CMAKE_DIR=%VS_ROOT%\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin"
+if exist "%VS_CMAKE_DIR%\cmake.exe" (
+    set "PATH=%VS_CMAKE_DIR%;%PATH%"
+    echo [DETECT] Using VS-bundled CMake from "%VS_CMAKE_DIR%"
+)
+
+set PROJECT_ROOT=%~dp0
+REM Strip trailing backslash
+if "%PROJECT_ROOT:~-1%"=="\" set PROJECT_ROOT=%PROJECT_ROOT:~0,-1%
 set LLAMA_SRC=%PROJECT_ROOT%\llama-cpp
 set BUILD_DIR=%LLAMA_SRC%\build
 set BIN_DIR=%BUILD_DIR%\bin
@@ -43,13 +54,14 @@ if exist "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2\bin\nvcc.exe"
 )
 if !HAS_CUDA!==0 echo [DETECT] No CUDA Toolkit found — skipping CUDA backend
 
-REM Check Vulkan
+REM Check Vulkan — env var first, then scan C:\VulkanSDK\*
 if defined VULKAN_SDK (
     if exist "%VULKAN_SDK%\Include\vulkan\vulkan.h" (
         set HAS_VULKAN=1
         echo [DETECT] Vulkan SDK found at %VULKAN_SDK%
     )
-) else (
+)
+if !HAS_VULKAN!==0 (
     for /d %%D in ("C:\VulkanSDK\*") do (
         if exist "%%D\Include\vulkan\vulkan.h" (
             set VULKAN_SDK=%%D

@@ -43,32 +43,46 @@ fn detect_repo_root() -> PathBuf {
 }
 
 fn detect_model_root(repo_root: &Path) -> PathBuf {
-    // 1. Next to the launcher exe (release/portable layout)
+    // 1. Persisted model directory from config (user chose via Browse)
+    let cfg = LauncherConfig::load();
+    if !cfg.model_root.is_empty() {
+        let p = PathBuf::from(&cfg.model_root);
+        if p.is_dir() { return p; }
+    }
+    // 2. models/ next to the launcher exe (portable layout)
     if let Ok(exe_path) = std::env::current_exe() {
         let exe_dir = exe_path.parent().unwrap_or(std::path::Path::new("."));
         let portable_models = exe_dir.join("models");
         if portable_models.is_dir() { return portable_models; }
     }
-    // 2. Project-local models/
+    // 3. Project-local models/
     let local = repo_root.join("models");
     if local.is_dir() { return local; }
-    // 3. Shared model root
-    let shared = PathBuf::from(r"C:\AI_STUFF\LLM_MODEL");
-    if shared.is_dir() { return shared; }
-    local
+    // 4. User home fallback — create if needed
+    let home_models = dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("BonsaiLauncher")
+        .join("models");
+    let _ = std::fs::create_dir_all(&home_models);
+    home_models
 }
 
 fn detect_llama_root(repo_root: &Path) -> PathBuf {
+    // 1. Submodule within repo
     let local = repo_root.join("llama-cpp");
     if local.is_dir() { return local; }
-    let external = PathBuf::from(r"C:\AI_STUFF\PROGRAMMING\LLAMA\llama-cpp-turboquant-cuda");
-    if external.is_dir() { return external; }
+    // 2. system/ folder next to launcher exe (package layout)
+    if let Ok(exe_path) = std::env::current_exe() {
+        let exe_dir = exe_path.parent().unwrap_or(Path::new("."));
+        let system_dir = exe_dir.join("system");
+        if system_dir.join("llama-server.exe").exists() { return system_dir; }
+    }
     local
 }
 
 fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter("turboquant_launcher=info")
+        .with_env_filter("bonsai_launcher=info")
         .init();
 
     let _ = std::fs::create_dir_all(LauncherConfig::config_dir());
@@ -259,7 +273,7 @@ fn App() -> Element {
 
     let on_build = move |_| {
         let root = llama_root.read().clone();
-        let script = root.join("windows").join("Build-TurboQuant.ps1");
+        let script = root.join("windows").join("Build-Bonsai.ps1");
         if script.exists() {
             let _ = std::process::Command::new("powershell.exe")
                 .args(["-NoLogo", "-ExecutionPolicy", "Bypass", "-NoExit", "-File"])
