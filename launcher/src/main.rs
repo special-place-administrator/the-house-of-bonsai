@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod gguf;
 mod models;
 mod process;
 mod resources;
@@ -23,8 +24,6 @@ fn pick_model_folder() -> Option<PathBuf> {
 }
 
 fn detect_repo_root() -> PathBuf {
-    // Walk up from the executable to find the project root
-    // Looks for markers: models/ dir, launcher/ dir, or llama-cpp/ dir
     if let Ok(exe) = std::env::current_exe() {
         let mut dir = exe.parent().map(|p| p.to_path_buf());
         for _ in 0..6 {
@@ -36,25 +35,20 @@ fn detect_repo_root() -> PathBuf {
             }
         }
     }
-    // Fallback: current working directory
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 fn detect_model_root(repo_root: &Path) -> PathBuf {
-    // Project-local models/ first
     let local = repo_root.join("models");
     if local.is_dir() { return local; }
-    // Fallback to shared model root
     let shared = PathBuf::from(r"C:\AI_STUFF\LLM_MODEL");
     if shared.is_dir() { return shared; }
     local
 }
 
 fn detect_llama_root(repo_root: &Path) -> PathBuf {
-    // Project-local llama-cpp/ first
     let local = repo_root.join("llama-cpp");
     if local.is_dir() { return local; }
-    // Fallback to external llama.cpp
     let external = PathBuf::from(r"C:\AI_STUFF\PROGRAMMING\LLAMA\llama-cpp-turboquant-cuda");
     if external.is_dir() { return external; }
     local
@@ -95,11 +89,11 @@ fn App() -> Element {
     let mut status_text = use_signal(|| "Stopped".to_string());
     let mut status_color = use_signal(|| "#888".to_string());
     let mut log_lines: Signal<Vec<String>> = use_signal(Vec::new);
-    let mut server_running = use_signal(|| false);
+    let mut any_running = use_signal(|| false);
     let mut active_tab = use_signal(|| "launch".to_string());
     let mut message: Signal<Option<(String, bool)>> = use_signal(|| None);
 
-    // Initialize process manager once — uses llama-cpp root for server exe
+    // Initialize process manager once
     use_effect(move || {
         let root = llama_root.read().clone();
         let new_pm = Arc::new(RwLock::new(ProcessManager::new(&root)));
@@ -114,8 +108,8 @@ fn App() -> Element {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             if let Some(pm_ref) = pm.read().as_ref() {
                 let mgr = pm_ref.read().await;
-                let s = mgr.status.clone();
-                let running = mgr.is_running();
+                let running = mgr.is_any_running();
+                let (text, color) = mgr.aggregate_status();
                 let lines: Vec<String> = mgr
                     .stderr_lines
                     .iter()
@@ -129,14 +123,7 @@ fn App() -> Element {
                     .collect();
                 drop(mgr);
 
-                let (text, color) = match &s {
-                    ServerStatus::Stopped => ("Stopped".into(), "#888".into()),
-                    ServerStatus::Starting => ("Starting...".into(), "#e6a817".into()),
-                    ServerStatus::Running => ("Running".into(), "#4caf50".into()),
-                    ServerStatus::Unhealthy => ("Unhealthy".into(), "#ff9800".into()),
-                    ServerStatus::Crashed(msg) => (format!("Crashed: {msg}"), "#f44336".into()),
-                };
-                server_running.set(running);
+                any_running.set(running);
                 status_text.set(text);
                 status_color.set(color);
                 log_lines.set(lines);
@@ -144,23 +131,25 @@ fn App() -> Element {
         }
     });
 
-    // Toggle start/stop — single button
+    // Toggle start/stop ALL slots
     let on_toggle_server = move |_| {
-        let running = *server_running.read();
+        let running = *any_running.read();
         spawn(async move {
             let pm_clone = pm.read().clone();
             if let Some(pm_ref) = pm_clone.as_ref() {
                 let mut mgr = pm_ref.write().await;
                 if running {
-                    if let Err(e) = mgr.stop().await {
-                        message.set(Some((e, true)));
-                    }
+                    mgr.stop_all().await;
                 } else {
                     let cfg = config.read().clone();
                     let _ = cfg.save();
-                    match mgr.start(&cfg).await {
-                        Ok(()) => status_text.set("Starting...".into()),
-                        Err(e) => message.set(Some((e, true))),
+                    mgr.ensure_slots(cfg.slots.len());
+                    let results = mgr.start_all(&cfg).await;
+                    let errors: Vec<_> = results.into_iter()
+                        .filter_map(|r| r.err())
+                        .collect();
+                    if !errors.is_empty() {
+                        message.set(Some((errors.join("\n"), true)));
                     }
                 }
             }
@@ -190,23 +179,33 @@ fn App() -> Element {
             let entries = ModelCatalog::scan(&folder, &cfg.recent_models).entries;
             let count = entries.len();
             model_list.set(entries);
+            config.write().model_root = folder.display().to_string();
+            let _ = config.read().save();
             message.set(Some((format!("Loaded {} models from {}", count, folder.display()), false)));
         }
     };
 
     let on_open_chat = move |_| {
         let cfg = config.read();
-        let _ = open::that(format!("http://{}:{}/", cfg.host, cfg.port));
+        if let Some(slot) = cfg.slots.first() {
+            let _ = open::that(format!("http://{}:{}/", cfg.host, slot.port));
+        }
     };
 
     let on_auto_tune = move |_| {
         let res = SystemResources::detect();
         let mut cfg = config.write();
-        let model_path = cfg.model_path.clone();
-        res.auto_tune(&mut cfg, &model_path);
+        let mut last_threads = (0u32, 0u32);
+        for i in 0..cfg.slots.len() {
+            let model_path = cfg.slots[i].model_path.clone();
+            let meta = gguf::ModelMetadata::from_file(&model_path);
+            last_threads = res.auto_tune(&mut cfg.slots[i], &model_path, meta.as_ref());
+        }
+        cfg.threads = last_threads.0.to_string();
+        cfg.threads_http = last_threads.1.to_string();
         let _ = cfg.save();
         drop(cfg);
-        message.set(Some((format!("Auto-tuned & saved!\n{}", res.summary()), false)));
+        message.set(Some((format!("Auto-tuned all slots & saved!\n{}", res.summary()), false)));
     };
 
     let on_build = move |_| {
@@ -223,24 +222,17 @@ fn App() -> Element {
         }
     };
 
-    let cmd_preview = {
-        let cfg = config.read();
-        let root = repo_root.read();
-        let exe = root.join("build").join("bin").join("llama-server.exe");
-        cfg.command_preview(&exe)
-    };
-
     rsx! {
         style { {include_str!("../assets/style.css")} }
 
         div { class: "app",
-            // Header — background changes with server state
+            // Header
             div {
-                class: if *server_running.read() { "header header-running" } else { "header header-stopped" },
-                if *server_running.read() {
-                    button { class: "btn btn-stop", onclick: on_toggle_server, "■ Stop" }
+                class: if *any_running.read() { "header header-running" } else { "header header-stopped" },
+                if *any_running.read() {
+                    button { class: "btn btn-stop", onclick: on_toggle_server, "■ Stop All" }
                 } else {
-                    button { class: "btn btn-start", onclick: on_toggle_server, "▶ Start" }
+                    button { class: "btn btn-start", onclick: on_toggle_server, "▶ Start All" }
                 }
                 button { class: "btn", onclick: on_open_chat, "💬 Chat" }
                 button { class: "btn", onclick: on_build, "🔧 Build" }
@@ -284,10 +276,10 @@ fn App() -> Element {
             div { class: "tab-content",
                 match active_tab.read().as_str() {
                     "launch" => rsx! {
-                        LaunchTab { config, model_list }
+                        LaunchTab { config, model_list, pm, message }
                     },
                     "advanced" => rsx! {
-                        AdvancedTab { config, cmd_preview: cmd_preview.clone() }
+                        AdvancedTab { config, repo_root: repo_root.read().clone() }
                     },
                     "logs" => rsx! {
                         LogsTab { log_lines, status_text: status_text.read().clone() }
@@ -299,33 +291,140 @@ fn App() -> Element {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Launch Tab — scrollable list of model cards + add button
+// ---------------------------------------------------------------------------
+
 #[component]
-fn LaunchTab(config: Signal<LauncherConfig>, model_list: Signal<Vec<ModelEntry>>) -> Element {
-    let cfg = config.read().clone();
+fn LaunchTab(
+    config: Signal<LauncherConfig>,
+    model_list: Signal<Vec<ModelEntry>>,
+    pm: Signal<Option<SharedProcessManager>>,
+    message: Signal<Option<(String, bool)>>,
+) -> Element {
+    let slot_count = config.read().slots.len();
 
     rsx! {
-        div { class: "panel-row",
-            div { class: "panel",
-                h3 { "Model" }
-                div { class: "field",
+        div { class: "model-cards-container",
+            for i in 0..slot_count {
+                ModelCard {
+                    config,
+                    model_list,
+                    pm,
+                    message,
+                    index: i,
+                    can_delete: slot_count > 1,
+                }
+            }
+
+            button {
+                class: "btn btn-add-model",
+                onclick: move |_| {
+                    config.write().add_slot();
+                    let _ = config.read().save();
+                },
+                "+ Add Model"
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Single model card
+// ---------------------------------------------------------------------------
+
+#[component]
+fn ModelCard(
+    config: Signal<LauncherConfig>,
+    model_list: Signal<Vec<ModelEntry>>,
+    pm: Signal<Option<SharedProcessManager>>,
+    message: Signal<Option<(String, bool)>>,
+    index: usize,
+    can_delete: bool,
+) -> Element {
+    // Read slot data
+    let cfg = config.read();
+    let slot = match cfg.slots.get(index) {
+        Some(s) => s.clone(),
+        None => return rsx! { div { "Slot not found" } },
+    };
+    drop(cfg);
+
+    // Read per-slot process status
+    let slot_status = use_memo(move || {
+        let pm_guard = pm.read();
+        if let Some(pm_ref) = pm_guard.as_ref() {
+            if let Ok(mgr) = pm_ref.try_read() {
+                if let Some(ps) = mgr.slots.get(index) {
+                    return ps.status.clone();
+                }
+            }
+        }
+        ServerStatus::Stopped
+    });
+
+    let status_dot_color = match &*slot_status.read() {
+        ServerStatus::Stopped => "#888",
+        ServerStatus::Starting => "#e6a817",
+        ServerStatus::Running => "#4caf50",
+        ServerStatus::Unhealthy => "#ff9800",
+        ServerStatus::Crashed(_) => "#f44336",
+    };
+
+    let status_label = format!("{}", &*slot_status.read());
+
+    // Auto-save helper
+    let save = move || { let _ = config.read().save(); };
+
+    rsx! {
+        div { class: "model-card",
+            // Card header
+            div { class: "model-card-header",
+                span { class: "model-card-title", "Model Slot {index + 1}" }
+                div { class: "model-card-header-right",
+                    span { class: "status-dot", style: "color: {status_dot_color};", title: "{status_label}",
+                        "●"
+                    }
+                    if can_delete {
+                        button {
+                            class: "btn-delete-slot",
+                            title: "Remove this slot",
+                            onclick: move |_| {
+                                config.write().remove_slot(index);
+                                let _ = config.read().save();
+                            },
+                            "✕"
+                        }
+                    }
+                }
+            }
+
+            // Card body — dense grid
+            div { class: "model-card-grid",
+                // Row 1: Model + Alias + Port
+                div { class: "field field-wide",
                     label { "Model" }
                     select {
-                        value: "{cfg.model_path}",
+                        value: "{slot.model_path}",
                         onchange: move |e: Event<FormData>| {
                             let val = e.value();
                             let mut c = config.write();
-                            c.model_path = val.clone();
-                            c.model_selection = val.clone();
-                            // Auto-tune for the selected model
-                            let res = SystemResources::detect();
-                            res.auto_tune(&mut c, &val);
+                            if let Some(s) = c.slots.get_mut(index) {
+                                s.model_path = val.clone();
+                                // Auto-tune this slot
+                                let meta = gguf::ModelMetadata::from_file(&val);
+                                let res = SystemResources::detect();
+                                let (threads, http_threads) = res.auto_tune(s, &val, meta.as_ref());
+                                c.threads = threads.to_string();
+                                c.threads_http = http_threads.to_string();
+                            }
                             let _ = c.save();
                         },
                         option { value: "", "-- Select a model --" }
                         for entry in model_list.read().iter() {
                             option {
                                 value: "{entry.path.display()}",
-                                selected: entry.path.to_string_lossy() == cfg.model_path,
+                                selected: entry.path.to_string_lossy() == slot.model_path,
                                 "{entry.display_name} ({format_size(entry.size_bytes)})"
                             }
                         }
@@ -335,115 +434,236 @@ fn LaunchTab(config: Signal<LauncherConfig>, model_list: Signal<Vec<ModelEntry>>
                     label { "Alias" }
                     input {
                         r#type: "text",
-                        value: "{cfg.alias}",
-                        onchange: move |e: Event<FormData>| config.write().alias = e.value(),
+                        value: "{slot.alias}",
+                        onchange: move |e: Event<FormData>| {
+                            if let Some(s) = config.write().slots.get_mut(index) { s.alias = e.value(); }
+                            save();
+                        },
                     }
-                }
-            }
-
-            div { class: "panel",
-                h3 { "TurboQuant" }
-                SelectField { label: "Cache Type K", value: cfg.cache_type_k.clone(),
-                    options: vec!["f16","q8_0","turbo2","turbo3","turbo4"],
-                    on_change: move |v: String| config.write().cache_type_k = v }
-                SelectField { label: "Cache Type V", value: cfg.cache_type_v.clone(),
-                    options: vec!["f16","q8_0","turbo2","turbo3","turbo4"],
-                    on_change: move |v: String| config.write().cache_type_v = v }
-                SelectField { label: "Layer Adaptive", value: cfg.turbo_layer_adaptive.clone(),
-                    options: vec!["off","1","5"],
-                    on_change: move |v: String| config.write().turbo_layer_adaptive = v }
-                SelectField { label: "Flash Attention", value: cfg.flash_attention.clone(),
-                    options: vec!["auto","on","off"],
-                    on_change: move |v: String| config.write().flash_attention = v }
-                div { class: "field",
-                    label { "Context Size" }
-                    input { r#type: "text", value: "{cfg.context_size}",
-                        onchange: move |e: Event<FormData>| config.write().context_size = e.value() }
-                }
-                div { class: "field",
-                    label { "GPU Layers" }
-                    input { r#type: "text", value: "{cfg.gpu_layers}",
-                        onchange: move |e: Event<FormData>| config.write().gpu_layers = e.value() }
-                }
-            }
-
-            div { class: "panel",
-                h3 { "Server" }
-                div { class: "field",
-                    label { "Host" }
-                    input { r#type: "text", value: "{cfg.host}",
-                        onchange: move |e: Event<FormData>| config.write().host = e.value() }
                 }
                 div { class: "field",
                     label { "Port" }
-                    input { r#type: "text", value: "{cfg.port}",
+                    input {
+                        r#type: "text",
+                        value: "{slot.port}",
                         onchange: move |e: Event<FormData>| {
-                            if let Ok(p) = e.value().parse() { config.write().port = p; }
-                        }
+                            if let Ok(p) = e.value().parse::<u16>() {
+                                if let Some(s) = config.write().slots.get_mut(index) { s.port = p; }
+                                save();
+                            }
+                        },
+                    }
+                }
+
+                // Row 2: Context + Cache K + Cache V
+                div { class: "field",
+                    label { "Context" }
+                    input {
+                        r#type: "text",
+                        value: "{slot.context_size}",
+                        onchange: move |e: Event<FormData>| {
+                            if let Some(s) = config.write().slots.get_mut(index) { s.context_size = e.value(); }
+                            save();
+                        },
+                    }
+                }
+                SlotSelectField {
+                    label: "Cache K",
+                    value: slot.cache_type_k.clone(),
+                    options: vec!["f16","q8_0","turbo2","turbo3","turbo4"],
+                    on_change: move |v: String| {
+                        if let Some(s) = config.write().slots.get_mut(index) { s.cache_type_k = v; }
+                        save();
+                    },
+                }
+                SlotSelectField {
+                    label: "Cache V",
+                    value: slot.cache_type_v.clone(),
+                    options: vec!["f16","q8_0","turbo2","turbo3","turbo4"],
+                    on_change: move |v: String| {
+                        if let Some(s) = config.write().slots.get_mut(index) { s.cache_type_v = v; }
+                        save();
+                    },
+                }
+
+                // Row 3: FA + GPU Layers + Parallel Slots
+                SlotSelectField {
+                    label: "FA",
+                    value: slot.flash_attention.clone(),
+                    options: vec!["auto","on","off"],
+                    on_change: move |v: String| {
+                        if let Some(s) = config.write().slots.get_mut(index) { s.flash_attention = v; }
+                        save();
+                    },
+                }
+                div { class: "field",
+                    label { "GPU Layers" }
+                    input {
+                        r#type: "text",
+                        value: "{slot.gpu_layers}",
+                        onchange: move |e: Event<FormData>| {
+                            if let Some(s) = config.write().slots.get_mut(index) { s.gpu_layers = e.value(); }
+                            save();
+                        },
                     }
                 }
                 div { class: "field",
-                    label { "Parallel Slots" }
-                    input { r#type: "text", value: "{cfg.parallel}",
-                        onchange: move |e: Event<FormData>| config.write().parallel = e.value() }
+                    label { "Slots" }
+                    input {
+                        r#type: "text",
+                        value: "{slot.parallel}",
+                        onchange: move |e: Event<FormData>| {
+                            if let Some(s) = config.write().slots.get_mut(index) { s.parallel = e.value(); }
+                            save();
+                        },
+                    }
+                }
+
+                // Row 4: Batch + Ubatch + Embedding + Layer Adaptive
+                div { class: "field",
+                    label { "Batch" }
+                    input {
+                        r#type: "text",
+                        value: "{slot.batch_size}",
+                        onchange: move |e: Event<FormData>| {
+                            if let Some(s) = config.write().slots.get_mut(index) { s.batch_size = e.value(); }
+                            save();
+                        },
+                    }
                 }
                 div { class: "field",
-                    label { "Batch Size" }
-                    input { r#type: "text", value: "{cfg.batch_size}",
-                        onchange: move |e: Event<FormData>| config.write().batch_size = e.value() }
+                    label { "Ubatch" }
+                    input {
+                        r#type: "text",
+                        value: "{slot.ubatch_size}",
+                        onchange: move |e: Event<FormData>| {
+                            if let Some(s) = config.write().slots.get_mut(index) { s.ubatch_size = e.value(); }
+                            save();
+                        },
+                    }
                 }
-                div { class: "field",
-                    label { "Ubatch Size" }
-                    input { r#type: "text", value: "{cfg.ubatch_size}",
-                        onchange: move |e: Event<FormData>| config.write().ubatch_size = e.value() }
+                SlotSelectField {
+                    label: "Layer Adapt.",
+                    value: slot.turbo_layer_adaptive.clone(),
+                    options: vec!["off","1","5"],
+                    on_change: move |v: String| {
+                        if let Some(s) = config.write().slots.get_mut(index) { s.turbo_layer_adaptive = v; }
+                        save();
+                    },
                 }
+
+                // Embedding checkbox
                 div { class: "field",
-                    label { "Threads" }
-                    input { r#type: "text", value: "{cfg.threads}",
-                        onchange: move |e: Event<FormData>| config.write().threads = e.value() }
+                    label { " " }
+                    label { class: "checkbox-label",
+                        input {
+                            r#type: "checkbox",
+                            checked: slot.embedding_mode,
+                            onchange: move |e: Event<FormData>| {
+                                if let Some(s) = config.write().slots.get_mut(index) {
+                                    s.embedding_mode = e.value() == "true";
+                                }
+                                save();
+                            },
+                        }
+                        " Embedding"
+                    }
                 }
             }
         }
     }
 }
 
+// ---------------------------------------------------------------------------
+// Advanced Tab
+// ---------------------------------------------------------------------------
+
 #[component]
-fn AdvancedTab(config: Signal<LauncherConfig>, cmd_preview: String) -> Element {
+fn AdvancedTab(config: Signal<LauncherConfig>, repo_root: PathBuf) -> Element {
     let cfg = config.read().clone();
+    let exe = repo_root.join("build").join("bin").join("llama-server.exe");
+
+    // Build previews for all slots
+    let previews: Vec<String> = cfg.slots.iter().enumerate().map(|(i, slot)| {
+        format!("# Slot {}\n{}", i + 1, slot.command_preview(&exe, &cfg))
+    }).collect();
+    let cmd_preview = previews.join("\n\n");
 
     rsx! {
         div { class: "panel-row",
             div { class: "panel",
-                h3 { "Advanced Options" }
+                h3 { "Shared Options" }
                 div { class: "field",
-                    label { "API Key" }
-                    input { r#type: "password", value: "{cfg.api_key}",
-                        onchange: move |e: Event<FormData>| config.write().api_key = e.value() }
+                    label { "Host" }
+                    input { r#type: "text", value: "{cfg.host}",
+                        onchange: move |e: Event<FormData>| {
+                            config.write().host = e.value();
+                            let _ = config.read().save();
+                        }
+                    }
                 }
                 div { class: "field",
-                    label { "Log Verbosity" }
-                    input { r#type: "text", value: "{cfg.log_verbosity}",
-                        onchange: move |e: Event<FormData>| config.write().log_verbosity = e.value() }
+                    label { "Threads" }
+                    input { r#type: "text", value: "{cfg.threads}",
+                        onchange: move |e: Event<FormData>| {
+                            config.write().threads = e.value();
+                            let _ = config.read().save();
+                        }
+                    }
                 }
                 div { class: "field",
                     label { "HTTP Threads" }
                     input { r#type: "text", value: "{cfg.threads_http}",
-                        onchange: move |e: Event<FormData>| config.write().threads_http = e.value() }
+                        onchange: move |e: Event<FormData>| {
+                            config.write().threads_http = e.value();
+                            let _ = config.read().save();
+                        }
+                    }
+                }
+                div { class: "field",
+                    label { "API Key" }
+                    input { r#type: "password", value: "{cfg.api_key}",
+                        onchange: move |e: Event<FormData>| {
+                            config.write().api_key = e.value();
+                            let _ = config.read().save();
+                        }
+                    }
+                }
+                div { class: "field",
+                    label { "Log Verbosity" }
+                    input { r#type: "text", value: "{cfg.log_verbosity}",
+                        onchange: move |e: Event<FormData>| {
+                            config.write().log_verbosity = e.value();
+                            let _ = config.read().save();
+                        }
+                    }
                 }
                 div { class: "field",
                     label { "Extra Args" }
                     textarea { value: "{cfg.extra_args}", rows: "3",
-                        onchange: move |e: Event<FormData>| config.write().extra_args = e.value() }
+                        onchange: move |e: Event<FormData>| {
+                            config.write().extra_args = e.value();
+                            let _ = config.read().save();
+                        }
+                    }
                 }
                 div { class: "field-row",
                     label {
                         input { r#type: "checkbox", checked: cfg.no_mmap,
-                            onchange: move |e: Event<FormData>| config.write().no_mmap = e.value() == "true" }
+                            onchange: move |e: Event<FormData>| {
+                                config.write().no_mmap = e.value() == "true";
+                                let _ = config.read().save();
+                            }
+                        }
                         " Disable mmap"
                     }
                     label {
                         input { r#type: "checkbox", checked: cfg.disable_web_ui,
-                            onchange: move |e: Event<FormData>| config.write().disable_web_ui = e.value() == "true" }
+                            onchange: move |e: Event<FormData>| {
+                                config.write().disable_web_ui = e.value() == "true";
+                                let _ = config.read().save();
+                            }
+                        }
                         " Disable WebUI"
                     }
                 }
@@ -455,6 +675,10 @@ fn AdvancedTab(config: Signal<LauncherConfig>, cmd_preview: String) -> Element {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Logs Tab
+// ---------------------------------------------------------------------------
 
 #[component]
 fn LogsTab(log_lines: Signal<Vec<String>>, status_text: String) -> Element {
@@ -472,8 +696,12 @@ fn LogsTab(log_lines: Signal<Vec<String>>, status_text: String) -> Element {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Reusable select field for slot settings
+// ---------------------------------------------------------------------------
+
 #[component]
-fn SelectField(
+fn SlotSelectField(
     label: &'static str,
     value: String,
     options: Vec<&'static str>,

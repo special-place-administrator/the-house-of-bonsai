@@ -128,10 +128,15 @@ body {
 /* Form fields */
 .field {
     display: grid;
-    grid-template-columns: 120px 1fr;
+    grid-template-columns: 90px 1fr;
     align-items: center;
     gap: 8px;
-    margin-bottom: 8px;
+    margin-bottom: 6px;
+}
+
+.field.field-wide {
+    grid-column: 1 / -1;
+    grid-template-columns: 90px 1fr;
 }
 
 .field label {
@@ -143,7 +148,7 @@ body {
 .field input,
 .field select,
 .field textarea {
-    padding: 6px 10px;
+    padding: 5px 8px;
     border: 1px solid #555;
     border-radius: 4px;
     background: #292b30;
@@ -172,6 +177,15 @@ body {
 }
 
 .field-row label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #b8bec8;
+    cursor: pointer;
+}
+
+.checkbox-label {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -212,6 +226,96 @@ body {
     line-height: 1.5;
     white-space: pre-wrap;
     word-break: break-all;
+}
+
+/* =========================================================================
+   Model Cards
+   ========================================================================= */
+
+.model-cards-container {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.model-card {
+    background: #33363d;
+    border: 1px solid #4a4d55;
+    border-radius: 8px;
+    padding: 10px 14px;
+}
+
+.model-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #4a4d55;
+}
+
+.model-card-title {
+    color: #7cb8f0;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.model-card-header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.model-card .status-dot {
+    font-size: 14px;
+    line-height: 1;
+}
+
+.model-card-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px 12px;
+}
+
+/* Add-model button */
+.btn-add-model {
+    padding: 10px 20px;
+    border: 2px dashed #555;
+    border-radius: 8px;
+    background: transparent;
+    color: #7cb8f0;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    text-align: center;
+    transition: all 0.15s;
+}
+.btn-add-model:hover {
+    border-color: #7cb8f0;
+    background: rgba(124, 184, 240, 0.08);
+}
+
+/* Delete-slot button */
+.btn-delete-slot {
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: transparent;
+    color: #888;
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+}
+.btn-delete-slot:hover {
+    background: #5a2020;
+    border-color: #d44;
+    color: #ff6b6b;
 }
 
 /* Scrollbar */

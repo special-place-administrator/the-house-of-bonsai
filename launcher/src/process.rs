@@ -7,7 +7,7 @@ use tokio::sync::{RwLock, broadcast};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-use crate::config::LauncherConfig;
+use crate::config::{LauncherConfig, ModelSlot};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServerStatus {
@@ -39,12 +39,39 @@ pub struct RuntimeInfo {
     pub port: u16,
 }
 
-pub struct ProcessManager {
-    server_exe: PathBuf,
+// ---------------------------------------------------------------------------
+// Per-slot process state
+// ---------------------------------------------------------------------------
+
+pub struct ProcessSlot {
     child: Option<Child>,
     child_pid: Option<u32>,
     pub status: ServerStatus,
     pub runtime: Option<RuntimeInfo>,
+}
+
+impl ProcessSlot {
+    fn new() -> Self {
+        Self {
+            child: None,
+            child_pid: None,
+            status: ServerStatus::Stopped,
+            runtime: None,
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        matches!(self.status, ServerStatus::Starting | ServerStatus::Running | ServerStatus::Unhealthy)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-process manager
+// ---------------------------------------------------------------------------
+
+pub struct ProcessManager {
+    server_exe: PathBuf,
+    pub slots: Vec<ProcessSlot>,
     pub log_tx: broadcast::Sender<String>,
     pub stdout_lines: Vec<String>,
     pub stderr_lines: Vec<String>,
@@ -58,14 +85,21 @@ impl ProcessManager {
         let (log_tx, _) = broadcast::channel(256);
         Self {
             server_exe,
-            child: None,
-            child_pid: None,
-            status: ServerStatus::Stopped,
-            runtime: None,
+            slots: Vec::new(),
             log_tx,
             stdout_lines: Vec::new(),
             stderr_lines: Vec::new(),
         }
+    }
+
+    /// Ensure we have at least `n` ProcessSlot entries, adding empty ones as
+    /// needed.  Called before start to keep slots in sync with config.
+    pub fn ensure_slots(&mut self, n: usize) {
+        while self.slots.len() < n {
+            self.slots.push(ProcessSlot::new());
+        }
+        // Trim excess if config shrank
+        self.slots.truncate(n);
     }
 
     pub fn server_exe_exists(&self) -> bool {
@@ -76,27 +110,36 @@ impl ProcessManager {
         &self.server_exe
     }
 
-    pub async fn start(&mut self, config: &LauncherConfig) -> Result<(), String> {
-        if self.child.is_some() {
-            return Err("Server is already running. Stop it first.".into());
+    // -- single-slot operations -----------------------------------------------
+
+    pub async fn start_slot(
+        &mut self,
+        index: usize,
+        slot_config: &ModelSlot,
+        shared_config: &LauncherConfig,
+    ) -> Result<(), String> {
+        self.ensure_slots(index + 1);
+        let ps = &self.slots[index];
+
+        if ps.child.is_some() {
+            return Err(format!("Slot {} is already running. Stop it first.", index));
         }
         if !self.server_exe.exists() {
             return Err(format!("llama-server.exe not found at: {}", self.server_exe.display()));
         }
-        if config.model_path.is_empty() || !Path::new(&config.model_path).exists() {
-            if config.extra_args.is_empty() {
-                return Err("No model selected. Pick a GGUF file first.".into());
+        if slot_config.model_path.is_empty() || !Path::new(&slot_config.model_path).exists() {
+            if shared_config.extra_args.is_empty() {
+                return Err(format!("Slot {}: No model selected. Pick a GGUF file first.", index));
             }
         }
 
-        self.stdout_lines.clear();
-        self.stderr_lines.clear();
-        self.status = ServerStatus::Starting;
+        // Reset slot state
+        let ps = &mut self.slots[index];
+        ps.status = ServerStatus::Starting;
 
-        let mut args = config.build_server_args();
-        if !config.extra_args.is_empty() {
-            // Split extra args on whitespace (simple — doesn't handle quotes)
-            for part in config.extra_args.split_whitespace() {
+        let mut args = slot_config.build_server_args(shared_config);
+        if !shared_config.extra_args.is_empty() {
+            for part in shared_config.extra_args.split_whitespace() {
                 args.push(part.to_string());
             }
         }
@@ -107,41 +150,38 @@ impl ProcessManager {
             .stderr(std::process::Stdio::piped());
 
         // Set TURBO_LAYER_ADAPTIVE env
-        if config.turbo_layer_adaptive != "off" {
-            cmd.env("TURBO_LAYER_ADAPTIVE", &config.turbo_layer_adaptive);
+        if slot_config.turbo_layer_adaptive != "off" {
+            cmd.env("TURBO_LAYER_ADAPTIVE", &slot_config.turbo_layer_adaptive);
         }
 
-        // CREATE_NO_WINDOW on Windows
         #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        }
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
         let mut child = cmd.spawn()
-            .map_err(|e| format!("Failed to spawn llama-server: {e}"))?;
+            .map_err(|e| format!("Slot {}: Failed to spawn llama-server: {e}", index))?;
 
         let pid = child.id().unwrap_or(0);
-        self.child_pid = Some(pid);
-        self.runtime = Some(RuntimeInfo {
+        let ps = &mut self.slots[index];
+        ps.child_pid = Some(pid);
+        ps.runtime = Some(RuntimeInfo {
             pid,
             started_at: chrono::Utc::now(),
-            model_path: config.model_path.clone(),
-            host: config.host.clone(),
-            port: config.port,
+            model_path: slot_config.model_path.clone(),
+            host: shared_config.host.clone(),
+            port: slot_config.port,
         });
 
-        // Save runtime state for external tools
-        let _ = self.save_runtime_state();
+        let slot_prefix = format!("[slot-{}]", index);
 
         // Capture stdout
         if let Some(stdout) = child.stdout.take() {
             let tx = self.log_tx.clone();
+            let prefix = slot_prefix.clone();
             tokio::spawn(async move {
                 let reader = BufReader::new(stdout);
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    let _ = tx.send(format!("[stdout] {}", line));
+                    let _ = tx.send(format!("{} [stdout] {}", prefix, line));
                 }
             });
         }
@@ -149,22 +189,28 @@ impl ProcessManager {
         // Capture stderr
         if let Some(stderr) = child.stderr.take() {
             let tx = self.log_tx.clone();
+            let prefix = slot_prefix;
             tokio::spawn(async move {
                 let reader = BufReader::new(stderr);
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    let _ = tx.send(format!("[stderr] {}", line));
+                    let _ = tx.send(format!("{} [stderr] {}", prefix, line));
                 }
             });
         }
 
-        self.child = Some(child);
+        self.slots[index].child = Some(child);
+
+        // Save combined runtime state
+        let _ = self.save_runtime_state();
         Ok(())
     }
 
-    pub async fn stop(&mut self) -> Result<(), String> {
-        // Always use taskkill with stored PID — most reliable on Windows
-        if let Some(pid) = self.child_pid.take() {
+    pub async fn stop_slot(&mut self, index: usize) -> Result<(), String> {
+        if index >= self.slots.len() { return Ok(()); }
+        let ps = &mut self.slots[index];
+
+        if let Some(pid) = ps.child_pid.take() {
             if pid > 0 {
                 let mut cmd = std::process::Command::new("taskkill");
                 cmd.args(["/F", "/PID", &pid.to_string()]);
@@ -174,33 +220,92 @@ impl ProcessManager {
             }
         }
 
-        // Clean up tokio child handle
-        if let Some(mut child) = self.child.take() {
+        if let Some(mut child) = ps.child.take() {
             let _ = child.wait().await;
         }
 
-        self.status = ServerStatus::Stopped;
-        self.runtime = None;
-        self.clear_runtime_state();
+        ps.status = ServerStatus::Stopped;
+        ps.runtime = None;
+
+        // Update persisted state
+        if self.is_any_running() {
+            let _ = self.save_runtime_state();
+        } else {
+            self.clear_runtime_state();
+        }
         Ok(())
     }
 
-    pub fn is_running(&self) -> bool {
-        matches!(self.status, ServerStatus::Starting | ServerStatus::Running | ServerStatus::Unhealthy)
+    // -- batch operations -----------------------------------------------------
+
+    pub async fn start_all(&mut self, config: &LauncherConfig) -> Vec<Result<(), String>> {
+        self.ensure_slots(config.slots.len());
+        let mut results = Vec::new();
+        for i in 0..config.slots.len() {
+            let r = self.start_slot(i, &config.slots[i].clone(), config).await;
+            results.push(r);
+        }
+        results
     }
 
-    pub async fn check_alive(&mut self) -> bool {
-        if let Some(child) = &mut self.child {
+    pub async fn stop_all(&mut self) {
+        let len = self.slots.len();
+        for i in 0..len {
+            let _ = self.stop_slot(i).await;
+        }
+    }
+
+    // -- status queries -------------------------------------------------------
+
+    pub fn is_any_running(&self) -> bool {
+        self.slots.iter().any(|s| s.is_running())
+    }
+
+    pub fn is_all_running(&self) -> bool {
+        !self.slots.is_empty() && self.slots.iter().all(|s| s.is_running())
+    }
+
+    pub fn running_count(&self) -> usize {
+        self.slots.iter().filter(|s| s.is_running()).count()
+    }
+
+    /// Aggregate status label for the header badge.
+    pub fn aggregate_status(&self) -> (String, String) {
+        let total = self.slots.len();
+        let running = self.running_count();
+        if running == 0 {
+            // Check for crashes
+            let crashed = self.slots.iter().any(|s| matches!(s.status, ServerStatus::Crashed(_)));
+            if crashed {
+                let msg = self.slots.iter()
+                    .filter_map(|s| if let ServerStatus::Crashed(m) = &s.status { Some(m.as_str()) } else { None })
+                    .next()
+                    .unwrap_or("unknown");
+                (format!("Crashed: {}", msg), "#f44336".into())
+            } else {
+                ("Stopped".into(), "#888".into())
+            }
+        } else if running == total {
+            ("Running".into(), "#4caf50".into())
+        } else {
+            (format!("Partial ({}/{})", running, total), "#e6a817".into())
+        }
+    }
+
+    // -- health checks --------------------------------------------------------
+
+    pub async fn check_alive_slot(&mut self, index: usize) -> bool {
+        if index >= self.slots.len() { return false; }
+        let ps = &mut self.slots[index];
+        if let Some(child) = &mut ps.child {
             match child.try_wait() {
                 Ok(Some(exit_status)) => {
-                    // Process has exited
                     let msg = format!("exit code: {}", exit_status);
-                    self.status = ServerStatus::Crashed(msg);
-                    self.child = None;
-                    self.clear_runtime_state();
+                    ps.status = ServerStatus::Crashed(msg);
+                    ps.child = None;
                     false
                 }
-                Ok(None) => true, // Still running
+                Ok(None) => true,
                 Err(_) => false,
             }
         } else {
@@ -208,35 +313,51 @@ impl ProcessManager {
         }
     }
 
-    pub async fn health_check(&mut self) {
-        if !self.check_alive().await {
+    pub async fn health_check_slot(&mut self, index: usize) {
+        if !self.check_alive_slot(index).await {
             return;
         }
-
-        let Some(info) = &self.runtime else { return };
+        let ps = &self.slots[index];
+        let Some(info) = &ps.runtime else { return };
         let url = format!("http://{}:{}/health", info.host, info.port);
 
-        match reqwest::get(&url).await {
-            Ok(resp) if resp.status().is_success() => {
-                self.status = ServerStatus::Running;
-            }
-            _ => {
-                if self.status != ServerStatus::Starting {
-                    self.status = ServerStatus::Unhealthy;
-                }
+        let healthy = match reqwest::get(&url).await {
+            Ok(resp) if resp.status().is_success() => true,
+            _ => false,
+        };
+
+        let ps = &mut self.slots[index];
+        if healthy {
+            ps.status = ServerStatus::Running;
+        } else if ps.status != ServerStatus::Starting {
+            ps.status = ServerStatus::Unhealthy;
+        }
+    }
+
+    pub async fn health_check_all(&mut self) {
+        let len = self.slots.len();
+        for i in 0..len {
+            if self.slots[i].is_running() {
+                self.health_check_slot(i).await;
             }
         }
     }
 
+    // -- runtime state persistence --------------------------------------------
+
     fn save_runtime_state(&self) -> Result<(), String> {
-        let Some(info) = &self.runtime else { return Ok(()) };
-        let state = serde_json::json!({
-            "pid": info.pid,
-            "host": info.host,
-            "port": info.port,
-            "startedAt": info.started_at.to_rfc3339(),
-            "modelPath": info.model_path,
-        });
+        let active: Vec<_> = self.slots.iter()
+            .filter_map(|ps| ps.runtime.as_ref())
+            .map(|info| serde_json::json!({
+                "pid": info.pid,
+                "host": info.host,
+                "port": info.port,
+                "startedAt": info.started_at.to_rfc3339(),
+                "modelPath": info.model_path,
+            }))
+            .collect();
+
+        let state = serde_json::json!({ "slots": active });
         let path = LauncherConfig::runtime_state_path();
         let _ = std::fs::create_dir_all(path.parent().unwrap());
         std::fs::write(&path, serde_json::to_string_pretty(&state).unwrap_or_default())
@@ -258,7 +379,7 @@ pub fn spawn_health_loop(pm: SharedProcessManager) {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             let mut mgr = pm.write().await;
-            mgr.health_check().await;
+            mgr.health_check_all().await;
         }
     });
 }
@@ -275,7 +396,7 @@ pub fn spawn_log_collector(pm: SharedProcessManager) {
             match rx.recv().await {
                 Ok(line) => {
                     let mut mgr = pm2.write().await;
-                    if line.starts_with("[stderr]") {
+                    if line.contains("[stderr]") {
                         mgr.stderr_lines.push(line.clone());
                         if mgr.stderr_lines.len() > MAX_LOG_LINES {
                             mgr.stderr_lines.remove(0);
@@ -290,7 +411,6 @@ pub fn spawn_log_collector(pm: SharedProcessManager) {
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(_) => {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    // Re-subscribe if sender was dropped and recreated
                     rx = {
                         let mgr = pm2.read().await;
                         mgr.log_tx.subscribe()

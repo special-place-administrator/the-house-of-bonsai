@@ -1,5 +1,6 @@
 use std::path::Path;
-use crate::config::LauncherConfig;
+use crate::config::ModelSlot;
+use crate::gguf::ModelMetadata;
 
 const RESERVE_FRACTION: f64 = 0.10; // Reserve 10% of each resource
 
@@ -49,8 +50,20 @@ impl SystemResources {
         self.cpu_threads.saturating_sub(reserved)
     }
 
-    /// Auto-tune config based on detected resources and model size
-    pub fn auto_tune(&self, config: &mut LauncherConfig, model_path: &str) {
+    /// Auto-tune a single model slot based on detected resources and model size.
+    ///
+    /// When `meta` is provided the actual model architecture (KV heads,
+    /// head dim, layer count, native context length) is used for accurate
+    /// KV-cache sizing.  Without it, a generic 8B-class default is assumed.
+    ///
+    /// Returns the recommended CPU threads so the caller can apply them to
+    /// the shared config.
+    pub fn auto_tune(
+        &self,
+        slot: &mut ModelSlot,
+        model_path: &str,
+        meta: Option<&ModelMetadata>,
+    ) -> (u32, u32) {
         let model_size_mb = if !model_path.is_empty() {
             Path::new(model_path)
                 .metadata()
@@ -61,19 +74,14 @@ impl SystemResources {
         };
 
         let vram = self.usable_vram_mb();
-        let ram = self.usable_ram_mb();
         let threads = self.usable_threads();
 
         // Estimate VRAM budget after model loading
-        // Model VRAM ≈ file size * 1.1 (overhead for buffers)
         let model_vram = (model_size_mb as f64 * 1.1) as u64;
         let remaining_vram = vram.saturating_sub(model_vram);
 
         // -- Context size --
-        // KV cache formula: n_kv_heads * head_dim * 2(K+V) * n_layers * ctx * bytes_per_elem / 1MB
-        // For Qwen3-8B: 8 kv_heads, 128 head_dim, 36 layers
-        // bytes_per_elem by cache type: f16=2.0, q8_0=1.0, turbo2=0.25, turbo3=0.375, turbo4=0.5
-        let bytes_per_elem = match config.cache_type_k.as_str() {
+        let bytes_per_elem = match slot.cache_type_k.as_str() {
             "f16" => 2.0_f64,
             "q8_0" => 1.0,
             "turbo2" => 0.25,
@@ -81,57 +89,57 @@ impl SystemResources {
             "turbo4" => 0.5,
             _ => 2.0,
         };
-        // Generic 8B model: 8 kv_heads * 128 head_dim * 2 * 36 layers = 589824 per token
-        // Per 1K context in MB: 589824 * 1024 * bytes_per_elem / (1024*1024)
-        let kv_per_1k_ctx = (589824.0 * 1024.0 * bytes_per_elem / (1024.0 * 1024.0)) as u64;
+
+        let (kv_bytes_per_token, native_ctx) = if let Some(m) = meta {
+            let bpt = m.kv_bytes_per_token_per_layer().unwrap_or(8 * 128 * 2);
+            let layers = m.n_layers.unwrap_or(36) as u64;
+            let ctx_cap = m.context_length.unwrap_or(65536) as u64;
+            (bpt * layers, ctx_cap)
+        } else {
+            (589_824_u64, 65_536_u64)
+        };
+
+        // Per 1K context in MB
+        let kv_per_1k_ctx = (kv_bytes_per_token as f64 * 1024.0 * bytes_per_elem / (1024.0 * 1024.0)) as u64;
         let max_ctx_by_vram = if kv_per_1k_ctx > 0 {
-            // Leave 512 MB for compute buffers
             let kv_budget = remaining_vram.saturating_sub(512);
             (kv_budget / kv_per_1k_ctx) * 1024
         } else {
             32768
         };
-        // Cap at model's native context
-        let ctx = std::cmp::min(max_ctx_by_vram, 65536);
-        // Round down to nearest 4096
+        let ctx = std::cmp::min(max_ctx_by_vram, native_ctx);
         let ctx = (ctx / 4096) * 4096;
-        let ctx = std::cmp::max(ctx, 4096); // minimum 4K
-        config.context_size = ctx.to_string();
+        let ctx = std::cmp::max(ctx, 4096);
+        slot.context_size = ctx.to_string();
 
         // -- Batch size --
-        // Higher batch = faster prompt processing, more VRAM
         if remaining_vram > 8000 {
-            config.batch_size = "2048".into();
-            config.ubatch_size = "512".into();
+            slot.batch_size = "2048".into();
+            slot.ubatch_size = "512".into();
         } else if remaining_vram > 4000 {
-            config.batch_size = "1024".into();
-            config.ubatch_size = "256".into();
+            slot.batch_size = "1024".into();
+            slot.ubatch_size = "256".into();
         } else {
-            config.batch_size = "512".into();
-            config.ubatch_size = "128".into();
+            slot.batch_size = "512".into();
+            slot.ubatch_size = "128".into();
         }
 
         // -- Parallel slots --
-        // Each slot reserves context_size worth of KV cache
-        // With turbo3, can fit more slots
-        let ctx_val = ctx;
-        let kv_per_slot = (ctx_val / 1024) * kv_per_1k_ctx;
+        let kv_per_slot = (ctx / 1024) * kv_per_1k_ctx;
         let max_slots = if kv_per_slot > 0 {
             let kv_budget = remaining_vram.saturating_sub(512);
             std::cmp::min(kv_budget / kv_per_slot, 8)
         } else {
             1
         };
-        config.parallel = std::cmp::max(max_slots, 1).to_string();
-
-        // -- CPU threads --
-        config.threads = threads.to_string();
-        // HTTP threads: use a fraction of CPU threads
-        let http_threads = std::cmp::max(threads / 4, 2);
-        config.threads_http = http_threads.to_string();
+        slot.parallel = std::cmp::max(max_slots, 1).to_string();
 
         // -- GPU layers --
-        config.gpu_layers = "auto".into();
+        slot.gpu_layers = "auto".into();
+
+        // Return recommended threads so the caller can set them on the shared config
+        let http_threads = std::cmp::max(threads / 4, 2);
+        (threads, http_threads)
     }
 
     /// Generate a human-readable summary
@@ -177,7 +185,6 @@ fn detect_gpu() -> (u64, u64, String) {
 }
 
 fn detect_ram() -> (u64, u64) {
-    // Use wmic for quick RAM detection on Windows
     let total = run_wmic_query("ComputerSystem", "TotalPhysicalMemory")
         .and_then(|s| s.trim().parse::<u64>().ok())
         .map(|b| b / (1024 * 1024))
@@ -185,7 +192,7 @@ fn detect_ram() -> (u64, u64) {
 
     let free = run_wmic_query("OS", "FreePhysicalMemory")
         .and_then(|s| s.trim().parse::<u64>().ok())
-        .map(|kb| kb / 1024) // wmic returns KB for this
+        .map(|kb| kb / 1024)
         .unwrap_or(0);
 
     (total, free)
@@ -213,13 +220,11 @@ fn detect_cpu() -> (u32, u32) {
         .map(|p| p.get() as u32)
         .unwrap_or(4);
 
-    // On Windows, NUMBER_OF_PROCESSORS gives logical processors (threads)
     let threads = std::env::var("NUMBER_OF_PROCESSORS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(cores);
 
-    // Rough core estimate: threads / 2 for SMT
     let physical_cores = if threads > cores { cores } else { threads / 2 };
     let physical_cores = std::cmp::max(physical_cores, 1);
 
