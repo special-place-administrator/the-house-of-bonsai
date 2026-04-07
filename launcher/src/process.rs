@@ -196,6 +196,55 @@ impl ProcessManager {
             }
         }
 
+        // Hide GPU backend DLLs that would crash due to missing runtimes.
+        // Temporarily rename them so Windows doesn't try to load them.
+        #[cfg(target_os = "windows")]
+        let _dll_guard = {
+            let exe_dir = self.server_exe.parent().unwrap_or(Path::new("."));
+            let backend = &slot_config.backend;
+            let mut hidden: Vec<(PathBuf, PathBuf)> = Vec::new();
+
+            // Check if CUDA runtime is available
+            let has_cuda = std::env::var("CUDA_PATH").is_ok()
+                || PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA").is_dir();
+            // Check if Vulkan runtime is available
+            let has_vulkan = std::env::var("VULKAN_SDK").is_ok()
+                || exe_dir.join("vulkan-1.dll").exists()
+                || PathBuf::from(r"C:\Windows\System32\vulkan-1.dll").exists();
+
+            let hide_cuda = match backend.as_str() {
+                "cpu" => true,
+                "vulkan" => true,
+                "cuda" => false,
+                _ => !has_cuda, // auto: hide if runtime missing
+            };
+            let hide_vulkan = match backend.as_str() {
+                "cpu" => true,
+                "cuda" => true,
+                "vulkan" => false,
+                _ => !has_vulkan, // auto: hide if runtime missing
+            };
+
+            if hide_cuda {
+                let src = exe_dir.join("ggml-cuda.dll");
+                let dst = exe_dir.join("ggml-cuda.dll.disabled");
+                if src.exists() {
+                    let _ = std::fs::rename(&src, &dst);
+                    hidden.push((dst.clone(), src.clone()));
+                }
+            }
+            if hide_vulkan {
+                let src = exe_dir.join("ggml-vulkan.dll");
+                let dst = exe_dir.join("ggml-vulkan.dll.disabled");
+                if src.exists() {
+                    let _ = std::fs::rename(&src, &dst);
+                    hidden.push((dst.clone(), src.clone()));
+                }
+            }
+            // Guard that restores DLLs when dropped
+            hidden
+        };
+
         let mut cmd = Command::new(&self.server_exe);
         cmd.args(&args)
             .stdout(std::process::Stdio::piped())
@@ -237,6 +286,16 @@ impl ProcessManager {
                     AssignProcessToJobObject(job.0, process_handle);
                     CloseHandle(process_handle);
                 }
+            }
+        }
+
+        // Restore hidden DLLs now that the child has loaded its dependencies.
+        // Small delay to ensure the child process has mapped its DLLs.
+        #[cfg(target_os = "windows")]
+        {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            for (disabled_path, original_path) in _dll_guard {
+                let _ = std::fs::rename(&disabled_path, &original_path);
             }
         }
 
