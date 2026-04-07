@@ -42,14 +42,18 @@ launcher\target\release\turboquant-launcher.exe
 
 Select a model, click **Start**, then **Chat**. Add more models with **+ Add Model**.
 
-### Pre-built Models
+### Getting Models
 
-| Model | Size | Purpose | Download |
-|-------|------|---------|----------|
-| **Bonsai-8B** (Q1_0) | 1.15 GB | Text/chat, tool use, thinking | [HuggingFace](https://huggingface.co/prism-ml/Bonsai-8B-gguf/resolve/main/Bonsai-8B.gguf) |
-| **nomic-embed-text-v2-moe** | 1.8 GB | Embeddings (768-dim) | [HuggingFace](https://huggingface.co/nomic-ai/nomic-embed-text-v2-moe/resolve/main/nomic-embed-text-v2-moe.f32.gguf) |
+Search and download models directly from the launcher — each model card has a built-in **HuggingFace search** with sort options (Newest, Popular, A-Z). No manual downloads needed.
 
-Place downloaded `.gguf` files in the `models/` folder, or use **Browse** in the launcher to point to any directory.
+**Recommended starter models for MCP tools (Prism, Goose, etc.):**
+
+| Model | Size | Purpose |
+|-------|------|---------|
+| **Bonsai-8B** (Q1_0) | 1.15 GB | Text/chat — search "bonsai" in the launcher |
+| **nomic-embed-text-v2-moe** | 1.8 GB | Embeddings (768-dim) — search "nomic embed" |
+
+You can also place `.gguf` files manually in the `models/` folder, or use **Browse** to point to any directory.
 
 ---
 
