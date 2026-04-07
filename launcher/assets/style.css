@@ -333,6 +333,107 @@ body {
     color: #ff6b6b;
 }
 
+/* =========================================================================
+   HuggingFace Search
+   ========================================================================= */
+
+.hf-search-section {
+    grid-column: 1 / -1;
+    margin-top: 4px;
+    padding-top: 8px;
+    border-top: 1px dashed #4a4d55;
+}
+
+.hf-search-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin-bottom: 6px;
+}
+
+.hf-search-row input {
+    flex: 1;
+    padding: 5px 8px;
+    border: 1px solid #555;
+    border-radius: 4px;
+    background: #292b30;
+    color: #f0f0f0;
+    font-size: 13px;
+}
+
+.hf-search-row input:focus {
+    outline: none;
+    border-color: #6ab0f0;
+}
+
+.btn-search {
+    padding: 5px 12px;
+    border: 1px solid #555;
+    border-radius: 4px;
+    background: #3b3d44;
+    color: #f0f0f0;
+    cursor: pointer;
+    font-size: 12px;
+    white-space: nowrap;
+    transition: background 0.15s;
+}
+.btn-search:hover { background: #4a4d55; }
+.btn-search:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.hf-results-select {
+    width: 100%;
+    padding: 5px 8px;
+    border: 1px solid #555;
+    border-radius: 4px;
+    background: #292b30;
+    color: #f0f0f0;
+    font-size: 13px;
+    margin-bottom: 6px;
+    cursor: pointer;
+}
+
+.hf-results-select:focus {
+    outline: none;
+    border-color: #6ab0f0;
+}
+
+.btn-download {
+    padding: 5px 12px;
+    border: 1px solid #2d6a30;
+    border-radius: 4px;
+    background: #2d6a30;
+    color: #f0f0f0;
+    cursor: pointer;
+    font-size: 12px;
+    transition: background 0.15s;
+    margin-bottom: 4px;
+}
+.btn-download:hover { background: #3e8b42; }
+
+.progress-bar-container {
+    height: 6px;
+    background: #292b30;
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 4px;
+}
+
+.progress-bar-fill {
+    height: 100%;
+    background: #4caf50;
+    border-radius: 3px;
+    transition: width 0.3s;
+}
+
+.progress-text {
+    font-size: 11px;
+    color: #999;
+    margin-top: 2px;
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar { width: 8px; }
 ::-webkit-scrollbar-track { background: #1e2025; }

@@ -2,6 +2,7 @@
 
 mod config;
 mod gguf;
+mod huggingface;
 mod models;
 mod process;
 mod resources;
@@ -11,6 +12,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use dioxus::prelude::*;
+use dioxus::prelude::Key;
 
 use config::LauncherConfig;
 use models::{ModelCatalog, ModelEntry, format_size};
@@ -279,7 +281,7 @@ fn App() -> Element {
             div { class: "tab-content",
                 match active_tab.read().as_str() {
                     "launch" => rsx! {
-                        LaunchTab { config, model_list, pm, message, cached_resources }
+                        LaunchTab { config, model_list, pm, message, cached_resources, shared_root }
                     },
                     "advanced" => rsx! {
                         AdvancedTab { config, repo_root: repo_root.read().clone() }
@@ -305,6 +307,7 @@ fn LaunchTab(
     pm: Signal<Option<SharedProcessManager>>,
     message: Signal<Option<(String, bool)>>,
     cached_resources: Signal<SystemResources>,
+    shared_root: Signal<PathBuf>,
 ) -> Element {
     let slot_count = config.read().slots.len();
 
@@ -317,6 +320,7 @@ fn LaunchTab(
                     pm,
                     message,
                     cached_resources,
+                    shared_root,
                     index: i,
                     can_delete: slot_count > 1,
                 }
@@ -345,6 +349,7 @@ fn ModelCard(
     pm: Signal<Option<SharedProcessManager>>,
     message: Signal<Option<(String, bool)>>,
     cached_resources: Signal<SystemResources>,
+    shared_root: Signal<PathBuf>,
     index: usize,
     can_delete: bool,
 ) -> Element {
@@ -381,6 +386,14 @@ fn ModelCard(
 
     // Auto-save helper
     let save = move || { let _ = config.read().save(); };
+
+    // HuggingFace search state
+    let mut hf_search_query = use_signal(|| String::new());
+    let mut hf_results: Signal<Vec<(String, String, u64)>> = use_signal(Vec::new);
+    let mut hf_searching = use_signal(|| false);
+    let mut hf_selected: Signal<Option<(String, String, u64)>> = use_signal(|| None);
+    let mut download_progress: Signal<Option<(u64, u64)>> = use_signal(|| None);
+    let mut downloading = use_signal(|| false);
 
     // Read GGUF metadata for capability icons
     let caps_icons: Vec<(&str, &str)> = if !slot.model_path.is_empty() {
@@ -642,6 +655,211 @@ fn ModelCard(
                             },
                         }
                         " Embedding"
+                    }
+                }
+            }
+
+            // HuggingFace search section
+            div { class: "hf-search-section",
+                div { class: "hf-search-row",
+                    input {
+                        r#type: "text",
+                        placeholder: "Search HuggingFace for GGUF models...",
+                        value: "{hf_search_query}",
+                        oninput: move |e: Event<FormData>| {
+                            hf_search_query.set(e.value());
+                        },
+                        onkeypress: move |e: Event<KeyboardData>| {
+                            if e.key() == Key::Enter && !hf_search_query.read().is_empty() && !*hf_searching.read() {
+                                let query = hf_search_query.read().clone();
+                                hf_searching.set(true);
+                                hf_results.set(Vec::new());
+                                hf_selected.set(None);
+                                spawn(async move {
+                                    match huggingface::search_models(&query).await {
+                                        Ok(models) => {
+                                            let mut all_files = Vec::new();
+                                            for model in models.iter().take(5) {
+                                                if let Ok(files) = huggingface::list_gguf_files(&model.model_id).await {
+                                                    for f in files {
+                                                        all_files.push((f.repo_id, f.filename, f.size_bytes));
+                                                    }
+                                                }
+                                            }
+                                            hf_results.set(all_files);
+                                        }
+                                        Err(e) => {
+                                            message.set(Some((format!("HF search error: {}", e), true)));
+                                        }
+                                    }
+                                    hf_searching.set(false);
+                                });
+                            }
+                        },
+                    }
+                    button {
+                        class: "btn-search",
+                        disabled: *hf_searching.read() || hf_search_query.read().is_empty(),
+                        onclick: move |_| {
+                            let query = hf_search_query.read().clone();
+                            if query.is_empty() || *hf_searching.read() { return; }
+                            hf_searching.set(true);
+                            hf_results.set(Vec::new());
+                            hf_selected.set(None);
+                            spawn(async move {
+                                match huggingface::search_models(&query).await {
+                                    Ok(models) => {
+                                        let mut all_files = Vec::new();
+                                        for model in models.iter().take(5) {
+                                            if let Ok(files) = huggingface::list_gguf_files(&model.model_id).await {
+                                                for f in files {
+                                                    all_files.push((f.repo_id, f.filename, f.size_bytes));
+                                                }
+                                            }
+                                        }
+                                        hf_results.set(all_files);
+                                    }
+                                    Err(e) => {
+                                        message.set(Some((format!("HF search error: {}", e), true)));
+                                    }
+                                }
+                                hf_searching.set(false);
+                            });
+                        },
+                        if *hf_searching.read() { "Searching..." } else { "Search HF" }
+                    }
+                }
+
+                // Results dropdown
+                if !hf_results.read().is_empty() {
+                    select {
+                        class: "hf-results-select",
+                        onchange: move |e: Event<FormData>| {
+                            let val = e.value();
+                            if val.is_empty() {
+                                hf_selected.set(None);
+                            } else {
+                                let results = hf_results.read();
+                                if let Some(idx) = val.parse::<usize>().ok() {
+                                    if let Some(item) = results.get(idx) {
+                                        hf_selected.set(Some(item.clone()));
+                                    }
+                                }
+                            }
+                        },
+                        option { value: "", "-- Select a GGUF file --" }
+                        for (i, (repo, fname, size)) in hf_results.read().iter().enumerate() {
+                            option {
+                                value: "{i}",
+                                "{repo}/{fname} ({format_size(*size)})"
+                            }
+                        }
+                    }
+                }
+
+                // Download button and progress
+                if let Some((repo, fname, _size)) = hf_selected.read().as_ref() {
+                    if !*downloading.read() {
+                        {
+                            let repo = repo.clone();
+                            let fname = fname.clone();
+                            rsx! {
+                                button {
+                                    class: "btn-download",
+                                    onclick: move |_| {
+                                        let root = shared_root.read().clone();
+                                        let url = format!("https://huggingface.co/{}/resolve/main/{}", repo, fname);
+                                        let dest = root.join(&fname);
+                                        downloading.set(true);
+                                        download_progress.set(Some((0, 0)));
+                                        let fname_clone = fname.clone();
+                                        spawn(async move {
+                                            let (tx, mut rx) = tokio::sync::watch::channel((0u64, 0u64));
+                                            // Spawn progress poller
+                                            let _progress_handle = spawn(async move {
+                                                loop {
+                                                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                                                    let val = *rx.borrow_and_update();
+                                                    download_progress.set(Some(val));
+                                                    if rx.has_changed().is_err() { break; }
+                                                }
+                                            });
+                                            match huggingface::download_model(&url, &dest, tx).await {
+                                                Ok(()) => {
+                                                    // Refresh model list
+                                                    let cfg = config.read().clone();
+                                                    let entries = crate::models::ModelCatalog::scan(&root, &cfg.recent_models).entries;
+                                                    model_list.set(entries);
+                                                    // Set this slot to the downloaded model
+                                                    let dest_str = dest.display().to_string();
+                                                    {
+                                                        let mut c = config.write();
+                                                        if let Some(s) = c.slots.get_mut(index) {
+                                                            s.model_path = dest_str.clone();
+                                                        }
+                                                        c.add_recent_model(&dest_str);
+                                                        let _ = c.save();
+                                                    }
+                                                    // Auto-tune the slot
+                                                    let meta = crate::gguf::ModelMetadata::from_file(&dest_str);
+                                                    let res = cached_resources.read().clone();
+                                                    {
+                                                        let mut c = config.write();
+                                                        if let Some(s) = c.slots.get_mut(index) {
+                                                            if let Some(ref m) = meta {
+                                                                if let Some(ref model_name) = m.name {
+                                                                    s.alias = model_name.clone();
+                                                                }
+                                                                if m.capabilities.embedding {
+                                                                    s.embedding_mode = true;
+                                                                    s.cache_type_k = "f16".into();
+                                                                    s.cache_type_v = "f16".into();
+                                                                    s.flash_attention = "off".into();
+                                                                    s.turbo_layer_adaptive = "off".into();
+                                                                    s.parallel = "4".into();
+                                                                }
+                                                            }
+                                                            let (threads, http_threads) = res.auto_tune(s, &dest_str, meta.as_ref());
+                                                            c.threads = threads.to_string();
+                                                            c.threads_http = http_threads.to_string();
+                                                        }
+                                                        let _ = c.save();
+                                                    }
+                                                    message.set(Some((format!("Downloaded: {}", fname_clone), false)));
+                                                }
+                                                Err(e) => {
+                                                    message.set(Some((format!("Download failed: {}", e), true)));
+                                                }
+                                            }
+                                            downloading.set(false);
+                                            download_progress.set(None);
+                                            hf_selected.set(None);
+                                        });
+                                    },
+                                    "Download to models/"
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Progress bar
+                if let Some((downloaded, total)) = download_progress.read().as_ref() {
+                    {
+                        let pct = if *total > 0 { (*downloaded as f64 / *total as f64 * 100.0) as u32 } else { 0 };
+                        let downloaded_display = format_size(*downloaded);
+                        let total_display = if *total > 0 { format_size(*total) } else { "?".to_string() };
+                        rsx! {
+                            div { class: "progress-bar-container",
+                                div {
+                                    class: "progress-bar-fill",
+                                    style: "width: {pct}%;",
+                                }
+                            }
+                            div { class: "progress-text",
+                                "{pct}% ({downloaded_display} / {total_display})"
+                            }
+                        }
                     }
                 }
             }

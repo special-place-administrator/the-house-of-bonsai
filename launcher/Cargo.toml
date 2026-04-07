@@ -36,6 +36,7 @@ chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 open = "5.3"
 dirs = "6"
+urlencoding = "2"
 
 [profile.release]
 opt-level = "s"
