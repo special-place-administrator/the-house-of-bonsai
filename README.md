@@ -1,5 +1,6 @@
 ![Bonsai](./logo.jpg)
 
+
 # The House of Bonsai
 
 > This project was inspired by the lovely name [PrismML](https://prismml.com) gave to their 1-bit model — **Bonsai**. A whole platform sprung from that small, beautiful fact. We thank them for their courage in pursuing what others dismissed: training production-quality models on an unproven Microsoft research paper about 1-bit quantization. When the rest of the industry played it safe, PrismML took the risky path — and proved that the impossible is just unexplored.
@@ -157,6 +158,8 @@ the-house-of-bonsai/
 ## How It Works
 
 ### Q1_0 Quantization
+
+![ver130](./ver130.png)
 
 Bonsai-8B uses PrismML's Q1_0 format — each weight is a single bit (`0` = -scale, `1` = +scale) with a shared FP16 scale per 128 elements. This gives:
 
