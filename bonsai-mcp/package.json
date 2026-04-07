@@ -1,0 +1,20 @@
+{
+  "name": "bonsai-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for managing Bonsai inference stack",
+  "type": "module",
+  "main": "dist/server.js",
+  "bin": {
+    "bonsai-mcp-server": "dist/server.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

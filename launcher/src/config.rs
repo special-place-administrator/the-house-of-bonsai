@@ -206,6 +206,12 @@ pub struct LauncherConfig {
     #[serde(default)]
     pub extra_args: String,
 
+    // -- management API --
+    #[serde(default = "default_api_port")]
+    pub api_port: u16,
+    #[serde(default)]
+    pub api_secret: String,
+
     // -- bookkeeping --
     #[serde(default)]
     pub recent_models: Vec<String>,
@@ -230,6 +236,8 @@ fn default_ubatch_size() -> String { "512".into() }
 fn default_backend() -> String { "auto".into() }
 fn default_log_verbosity() -> String { "3".into() }
 
+fn default_api_port() -> u16 { 9876 }
+
 impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
@@ -242,6 +250,8 @@ impl Default for LauncherConfig {
             disable_web_ui: false,
             log_verbosity: default_log_verbosity(),
             extra_args: String::new(),
+            api_port: default_api_port(),
+            api_secret: String::new(),
             recent_models: Vec::new(),
             model_root: String::new(),
         }

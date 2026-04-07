@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod api;
 mod config;
 mod gguf;
 mod huggingface;
@@ -125,6 +126,28 @@ fn App() -> Element {
         let new_pm = Arc::new(RwLock::new(ProcessManager::new(&root)));
         process::spawn_health_loop(new_pm.clone());
         process::spawn_log_collector(new_pm.clone());
+
+        // Spawn management API server
+        let cfg = LauncherConfig::load();
+        let api_port = cfg.api_port;
+        let api_secret = if cfg.api_secret.is_empty() {
+            None
+        } else {
+            Some(cfg.api_secret.clone())
+        };
+        let model_root = detect_model_root(&root);
+        let api_state = api::ApiState {
+            pm: new_pm.clone(),
+            config: Arc::new(RwLock::new(cfg)),
+            model_root,
+            api_secret,
+        };
+        tokio::spawn(async move {
+            if let Err(e) = api::start_api(api_state, api_port).await {
+                tracing::error!("Management API failed: {}", e);
+            }
+        });
+
         pm.set(Some(new_pm));
     });
 
@@ -1154,16 +1177,29 @@ fn DeployPrismModal(
         spawn(async move {
             // Get readiness for building the entry
             let readiness = prism::check_prism_readiness(&cfg, &root).await;
-            let entry = prism::build_mcp_entry(&readiness, &cfg, dp);
+            let prism_entry = prism::build_mcp_entry(&readiness, &cfg, dp);
+            let bonsai_entry = prism::build_bonsai_entry(
+                &readiness,
+                &root,
+                cfg.api_port,
+                &cfg.host,
+            );
+
+            let entries: Vec<(&str, &serde_json::Value)> = vec![
+                ("prism-mcp", &prism_entry),
+                ("bonsai-mcp", &bonsai_entry),
+            ];
 
             for probe in &probes_snapshot {
                 if !probe.selected {
                     continue;
                 }
                 let label = probe.harness.label();
-                match prism::deploy_to_harness(probe, &entry) {
-                    Ok(msg) => {
-                        prism_deploy_log.with_mut(|l| l.push(format!("✓ {} — {}", label, msg)));
+                match prism::deploy_to_harness(probe, &entries) {
+                    Ok(msgs) => {
+                        for msg in msgs {
+                            prism_deploy_log.with_mut(|l| l.push(format!("✓ {} — {}", label, msg)));
+                        }
                     }
                     Err(err) => {
                         prism_deploy_log.with_mut(|l| l.push(format!("✗ {} — {}", label, err)));
@@ -1172,7 +1208,7 @@ fn DeployPrismModal(
             }
             prism_deploy_log.with_mut(|l| {
                 l.push(String::new());
-                l.push("Deployment complete! Restart your AI tools to activate Prism.".into());
+                l.push("Deployment complete! Restart your AI tools to activate Prism + Bonsai MCP.".into());
             });
             prism_deploying.set(false);
         });

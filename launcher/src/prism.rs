@@ -411,22 +411,92 @@ pub fn build_mcp_entry(
     })
 }
 
-pub fn deploy_to_harness(
-    probe: &HarnessProbe,
-    entry: &serde_json::Value,
-) -> Result<String, String> {
-    match probe.harness {
-        Harness::ClaudeCode => deploy_claude_code(entry),
-        _ => {
-            let path = probe
-                .config_path()
-                .ok_or_else(|| format!("{}: no config path", probe.harness.label()))?;
-            write_mcp_config_json(path, entry)
+pub fn build_bonsai_entry(
+    readiness: &PrismReadiness,
+    repo_root: &std::path::Path,
+    api_port: u16,
+    api_host: &str,
+) -> serde_json::Value {
+    let node_path = readiness.node_path.display().to_string();
+    let dist_path = repo_root
+        .join("bonsai-mcp")
+        .join("dist")
+        .join("server.js")
+        .display()
+        .to_string();
+
+    serde_json::json!({
+        "command": node_path,
+        "args": [dist_path],
+        "env": {
+            "BONSAI_API_PORT": api_port.to_string(),
+            "BONSAI_API_HOST": api_host,
         }
+    })
+}
+
+pub fn build_bonsai_mcp(repo_root: &std::path::Path) -> Result<String, String> {
+    let bonsai_dir = repo_root.join("bonsai-mcp");
+    if !bonsai_dir.exists() {
+        return Err("bonsai-mcp directory not found".into());
+    }
+
+    let npm = find_npm_exe().ok_or("npm not found. Install Node.js from nodejs.org")?;
+
+    // npm install
+    let install = Command::new(&npm)
+        .arg("install")
+        .current_dir(&bonsai_dir)
+        .output()
+        .map_err(|e| format!("Failed to run npm install: {}", e))?;
+
+    if !install.status.success() {
+        let stderr = String::from_utf8_lossy(&install.stderr);
+        return Err(format!("npm install failed in bonsai-mcp: {}", stderr));
+    }
+
+    // npm run build
+    let build = Command::new(&npm)
+        .arg("run")
+        .arg("build")
+        .current_dir(&bonsai_dir)
+        .output()
+        .map_err(|e| format!("Failed to run npm run build: {}", e))?;
+
+    if !build.status.success() {
+        let stderr = String::from_utf8_lossy(&build.stderr);
+        return Err(format!("npm run build failed in bonsai-mcp: {}", stderr));
+    }
+
+    let dist = bonsai_dir.join("dist").join("server.js");
+    if dist.exists() {
+        Ok(format!("bonsai-mcp build complete: {}", dist.display()))
+    } else {
+        Err("bonsai-mcp build completed but dist/server.js not found".into())
     }
 }
 
-fn deploy_claude_code(entry: &serde_json::Value) -> Result<String, String> {
+pub fn deploy_to_harness(
+    probe: &HarnessProbe,
+    entries: &[(&str, &serde_json::Value)],
+) -> Result<Vec<String>, String> {
+    let mut results = Vec::new();
+    for (name, entry) in entries {
+        let result = match probe.harness {
+            Harness::ClaudeCode => deploy_claude_code(name, entry),
+            _ => {
+                let path = probe
+                    .config_path()
+                    .ok_or_else(|| format!("{}: no config path", probe.harness.label()))?;
+                write_mcp_config_json(path, name, entry)
+            }
+        }?;
+        results.push(result);
+    }
+    Ok(results)
+}
+
+fn deploy_claude_code(name: &str, entry: &serde_json::Value) -> Result<String, String> {
     let command = entry["command"].as_str().unwrap_or("node");
     let args: Vec<&str> = entry["args"]
         .as_array()
@@ -447,7 +517,7 @@ fn deploy_claude_code(entry: &serde_json::Value) -> Result<String, String> {
         }
     }
 
-    cmd.arg("prism-mcp").arg("--").arg(command);
+    cmd.arg(name).arg("--").arg(command);
     for a in &args {
         cmd.arg(a);
     }
@@ -457,14 +527,14 @@ fn deploy_claude_code(entry: &serde_json::Value) -> Result<String, String> {
         .map_err(|e| format!("Failed to run claude mcp add: {}", e))?;
 
     if output.status.success() {
-        Ok("Registered via `claude mcp add` (user scope)".into())
+        Ok(format!("{}: registered via `claude mcp add` (user scope)", name))
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("claude mcp add failed: {}", stderr))
+        Err(format!("claude mcp add {} failed: {}", name, stderr))
     }
 }
 
-fn write_mcp_config_json(config_path: &std::path::Path, entry: &serde_json::Value) -> Result<String, String> {
+fn write_mcp_config_json(config_path: &std::path::Path, name: &str, entry: &serde_json::Value) -> Result<String, String> {
     // Ensure parent directory exists
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)
@@ -498,8 +568,8 @@ fn write_mcp_config_json(config_path: &std::path::Path, entry: &serde_json::Valu
         root["mcpServers"] = serde_json::json!({});
     }
 
-    // Insert/update prism-mcp entry — preserves all other servers
-    root["mcpServers"]["prism-mcp"] = entry.clone();
+    // Insert/update entry — preserves all other servers
+    root["mcpServers"][name] = entry.clone();
 
     // Write back pretty-printed
     let output = serde_json::to_string_pretty(&root)
@@ -513,5 +583,5 @@ fn write_mcp_config_json(config_path: &std::path::Path, entry: &serde_json::Valu
         )
     })?;
 
-    Ok(format!("Written to {}", config_path.display()))
+    Ok(format!("{}: written to {}", name, config_path.display()))
 }
