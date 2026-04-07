@@ -73,6 +73,9 @@ fn main() {
     let _ = std::fs::create_dir_all(LauncherConfig::log_dir());
 
     dioxus::launch(App);
+
+    // After Dioxus window closes: kill all llama-server processes
+    process::kill_all_llama_servers();
 }
 
 #[component]
@@ -397,6 +400,7 @@ fn ModelCard(
 
     // HuggingFace search state
     let mut hf_search_query = use_signal(|| String::new());
+    let mut hf_sort_by = use_signal(|| "lastModified".to_string());
     let mut hf_results: Signal<Vec<(String, String, u64)>> = use_signal(Vec::new);
     let mut hf_searching = use_signal(|| false);
     let mut hf_selected: Signal<Option<(String, String, u64)>> = use_signal(|| None);
@@ -680,11 +684,12 @@ fn ModelCard(
                         onkeypress: move |e: Event<KeyboardData>| {
                             if e.key() == Key::Enter && !hf_search_query.read().is_empty() && !*hf_searching.read() {
                                 let query = hf_search_query.read().clone();
+                                let sort = hf_sort_by.read().clone();
                                 hf_searching.set(true);
                                 hf_results.set(Vec::new());
                                 hf_selected.set(None);
                                 spawn(async move {
-                                    match huggingface::search_models(&query).await {
+                                    match huggingface::search_models(&query, &sort).await {
                                         Ok(models) => {
                                             let mut all_files = Vec::new();
                                             for model in models.iter().take(5) {
@@ -705,17 +710,26 @@ fn ModelCard(
                             }
                         },
                     }
+                    select {
+                        class: "hf-sort-select",
+                        value: "{hf_sort_by}",
+                        onchange: move |e: Event<FormData>| { hf_sort_by.set(e.value()); },
+                        option { value: "lastModified", "Newest" }
+                        option { value: "downloads", "Popular" }
+                        option { value: "alphabetical", "A-Z" }
+                    }
                     button {
                         class: "btn-search",
                         disabled: *hf_searching.read() || hf_search_query.read().is_empty(),
                         onclick: move |_| {
                             let query = hf_search_query.read().clone();
+                            let sort = hf_sort_by.read().clone();
                             if query.is_empty() || *hf_searching.read() { return; }
                             hf_searching.set(true);
                             hf_results.set(Vec::new());
                             hf_selected.set(None);
                             spawn(async move {
-                                match huggingface::search_models(&query).await {
+                                match huggingface::search_models(&query, &sort).await {
                                     Ok(models) => {
                                         let mut all_files = Vec::new();
                                         for model in models.iter().take(5) {

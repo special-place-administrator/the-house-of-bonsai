@@ -22,10 +22,17 @@ pub struct GgufFileInfo {
 }
 
 /// Search HuggingFace for GGUF models
-pub async fn search_models(query: &str) -> Result<Vec<HfModelResult>, String> {
+/// sort_by: "lastModified" (newest), "downloads" (popular), "alphabetical" (name)
+pub async fn search_models(query: &str, sort_by: &str) -> Result<Vec<HfModelResult>, String> {
+    let sort_param = match sort_by {
+        "alphabetical" => "id",
+        "downloads" => "downloads",
+        _ => "lastModified",
+    };
     let url = format!(
-        "https://huggingface.co/api/models?search={}&filter=gguf&sort=lastModified&direction=-1&limit=5",
-        urlencoding::encode(query)
+        "https://huggingface.co/api/models?search={}&filter=gguf&sort={}&direction=-1&limit=5",
+        urlencoding::encode(query),
+        sort_param,
     );
     let resp = reqwest::get(&url).await.map_err(|e| e.to_string())?;
     let models: Vec<HfModelResult> = resp.json().await.map_err(|e| e.to_string())?;

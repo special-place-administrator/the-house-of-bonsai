@@ -383,6 +383,16 @@ body {
     cursor: not-allowed;
 }
 
+.hf-sort-select {
+    padding: 5px 8px;
+    border: 1px solid #555;
+    border-radius: 4px;
+    background: #292b30;
+    color: #f0f0f0;
+    font-size: 12px;
+    cursor: pointer;
+}
+
 .hf-results-select {
     width: 100%;
     padding: 5px 8px;

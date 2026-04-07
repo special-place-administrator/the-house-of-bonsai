@@ -444,3 +444,44 @@ pub fn spawn_log_collector(pm: SharedProcessManager) {
         }
     });
 }
+
+
+/// Kill ALL llama-server.exe processes on the system.
+/// Called on launcher exit to prevent zombie processes.
+/// Tries graceful SIGTERM first, waits up to 3 seconds, then force-kills.
+pub fn kill_all_llama_servers() {
+    #[cfg(target_os = "windows")]
+    {
+        // First pass: taskkill (graceful)
+        let mut cmd = std::process::Command::new("taskkill");
+        cmd.args(["/IM", "llama-server.exe"]);
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        let _ = cmd.output();
+
+        // Wait up to 3 seconds for graceful shutdown
+        std::thread::sleep(std::time::Duration::from_secs(3));
+
+        // Second pass: force kill any survivors
+        let mut cmd = std::process::Command::new("taskkill");
+        cmd.args(["/F", "/IM", "llama-server.exe"]);
+        cmd.creation_flags(0x08000000);
+        let _ = cmd.output();
+
+        // Third pass: verify they're dead
+        let check = std::process::Command::new("tasklist")
+            .args(["/FI", "IMAGENAME eq llama-server.exe"])
+            .creation_flags(0x08000000)
+            .output();
+
+        if let Ok(output) = check {
+            let text = String::from_utf8_lossy(&output.stdout);
+            if text.contains("llama-server.exe") {
+                // Nuclear option: wmic
+                let mut cmd = std::process::Command::new("wmic");
+                cmd.args(["process", "where", "name='llama-server.exe'", "delete"]);
+                cmd.creation_flags(0x08000000);
+                let _ = cmd.output();
+            }
+        }
+    }
+}
