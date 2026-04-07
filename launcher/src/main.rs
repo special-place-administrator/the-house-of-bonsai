@@ -72,10 +72,29 @@ fn main() {
     let _ = std::fs::create_dir_all(LauncherConfig::config_dir());
     let _ = std::fs::create_dir_all(LauncherConfig::log_dir());
 
-    dioxus::launch(App);
+    // Register cleanup for Ctrl+C / SIGTERM
+    let _ = ctrlc::set_handler(|| {
+        process::kill_all_llama_servers();
+        std::process::exit(0);
+    });
 
-    // After Dioxus window closes: kill all llama-server processes
-    process::kill_all_llama_servers();
+    // Drop guard: kills llama-servers when main() scope exits
+    // (catches normal exit, panic, and process::exit via atexit)
+    struct CleanupGuard;
+    impl Drop for CleanupGuard {
+        fn drop(&mut self) {
+            process::kill_all_llama_servers();
+        }
+    }
+    let _guard = CleanupGuard;
+
+    // Also register via atexit for the case where Dioxus calls exit() directly
+    extern "C" fn cleanup_atexit() {
+        crate::process::kill_all_llama_servers();
+    }
+    unsafe { libc::atexit(cleanup_atexit); }
+
+    dioxus::launch(App);
 }
 
 #[component]

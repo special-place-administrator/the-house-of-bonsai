@@ -75,36 +75,74 @@ pub struct ProcessManager {
     pub log_tx: broadcast::Sender<String>,
     pub stdout_lines: Vec<String>,
     pub stderr_lines: Vec<String>,
+    #[cfg(target_os = "windows")]
+    job_handle: Option<JobHandle>,
 }
+
+/// Wrapper around a Windows Job Object handle to make it Send+Sync.
+/// Safe because the handle is only used via Win32 API calls that are thread-safe.
+#[cfg(target_os = "windows")]
+struct JobHandle(*mut std::ffi::c_void);
+#[cfg(target_os = "windows")]
+unsafe impl Send for JobHandle {}
+#[cfg(target_os = "windows")]
+unsafe impl Sync for JobHandle {}
 
 const MAX_LOG_LINES: usize = 5000;
 
 impl ProcessManager {
     pub fn new(repo_root: &Path) -> Self {
-            // Look for llama-server.exe in multiple locations:
-            // 1. Next to the launcher exe (release/portable layout)
-            // 2. In the build output directory (development layout)
-            let server_exe = if let Ok(exe_path) = std::env::current_exe() {
-                let exe_dir = exe_path.parent().unwrap_or(Path::new("."));
-                let portable = exe_dir.join("llama-server.exe");
-                if portable.exists() {
-                    portable
-                } else {
-                    repo_root.join("build").join("bin").join("llama-server.exe")
-                }
+        // Look for llama-server.exe in multiple locations:
+        // 1. Next to the launcher exe (release/portable layout)
+        // 2. In the build output directory (development layout)
+        let server_exe = if let Ok(exe_path) = std::env::current_exe() {
+            let exe_dir = exe_path.parent().unwrap_or(Path::new("."));
+            let portable = exe_dir.join("llama-server.exe");
+            if portable.exists() {
+                portable
             } else {
                 repo_root.join("build").join("bin").join("llama-server.exe")
-            };
-
-            let (log_tx, _) = broadcast::channel(256);
-            Self {
-                server_exe,
-                slots: Vec::new(),
-                log_tx,
-                stdout_lines: Vec::new(),
-                stderr_lines: Vec::new(),
             }
+        } else {
+            repo_root.join("build").join("bin").join("llama-server.exe")
+        };
+
+        // Create a Windows Job Object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.
+        // This guarantees all child llama-server processes die when the launcher
+        // exits — whether closed normally, crashed, or killed from Task Manager.
+        #[cfg(target_os = "windows")]
+        let job_handle = {
+            unsafe {
+                #[link(name = "kernel32")]
+                unsafe extern "system" {
+                    fn CreateJobObjectW(attrs: *mut std::ffi::c_void, name: *const u16) -> *mut std::ffi::c_void;
+                    fn SetInformationJobObject(job: *mut std::ffi::c_void, class: u32, info: *const u8, len: u32) -> i32;
+                }
+                let job = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
+                if !job.is_null() {
+                    // JOBOBJECT_EXTENDED_LIMIT_INFORMATION: LimitFlags at offset 16
+                    let mut info = [0u8; 112];
+                    let flags: u32 = 0x2000; // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                    info[16..20].copy_from_slice(&flags.to_le_bytes());
+                    SetInformationJobObject(job, 9, info.as_ptr(), info.len() as u32);
+                    Some(JobHandle(job))
+                } else {
+                    None
+                }
+            }
+        };
+
+        let (log_tx, _) = broadcast::channel(256);
+        Self {
+            server_exe,
+            slots: Vec::new(),
+            log_tx,
+            stdout_lines: Vec::new(),
+            stderr_lines: Vec::new(),
+            #[cfg(target_os = "windows")]
+            job_handle,
         }
+    }
 
     /// Ensure we have at least `n` ProcessSlot entries, adding empty ones as
     /// needed.  Called before start to keep slots in sync with config.
@@ -183,6 +221,24 @@ impl ProcessManager {
 
         let mut child = cmd.spawn()
             .map_err(|e| format!("Slot {}: Failed to spawn llama-server: {e}", index))?;
+
+        // Assign child to Job Object — Windows will kill it when launcher exits
+        #[cfg(target_os = "windows")]
+        if let (Some(job), Some(raw_pid)) = (&self.job_handle, child.id()) {
+            unsafe {
+                #[link(name = "kernel32")]
+                unsafe extern "system" {
+                    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
+                    fn AssignProcessToJobObject(job: *mut std::ffi::c_void, process: *mut std::ffi::c_void) -> i32;
+                    fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+                }
+                let process_handle = OpenProcess(0x001F0FFF, 0, raw_pid); // PROCESS_ALL_ACCESS
+                if !process_handle.is_null() {
+                    AssignProcessToJobObject(job.0, process_handle);
+                    CloseHandle(process_handle);
+                }
+            }
+        }
 
         let pid = child.id().unwrap_or(0);
         let ps = &mut self.slots[index];

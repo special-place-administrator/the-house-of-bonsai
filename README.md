@@ -2,7 +2,9 @@
 
 # The House of Bonsai
 
-> A multi-model inference platform with a native desktop launcher. Run any GGUF model — including PrismML's 1-bit Bonsai-8B — on NVIDIA, AMD, Intel, or CPU.
+> This project was inspired by the lovely name [PrismML](https://prismml.com) gave to their 1-bit model — **Bonsai**. A whole platform sprung from that small, beautiful fact. We thank them for their courage in pursuing what others dismissed: training production-quality models on an unproven Microsoft research paper about 1-bit quantization. When the rest of the industry played it safe, PrismML took the risky path — and proved that the impossible is just unexplored.
+
+A multi-model inference platform with a native desktop launcher. Run any GGUF model — including PrismML's 1-bit Bonsai-8B — on NVIDIA, AMD, Intel, or CPU.
 
 **Multi-GPU backend | Multi-model serving | Auto-tune | GGUF metadata-aware | Zero config**
 
