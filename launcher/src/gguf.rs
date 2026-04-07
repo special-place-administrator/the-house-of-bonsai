@@ -403,12 +403,21 @@ fn read_value<R: Read + Seek>(r: &mut R) -> io::Result<GgufValue> {
         TYPE_ARRAY   => {
             let elem_type = read_u32(r)?;
             let count = read_u64(r)?;
-            // Skip over array elements
+            // Skip over array elements as fast as possible.
             if elem_type == TYPE_STRING {
-                // String arrays: must read each element to know its length
+                // String arrays (tokenizer tokens, merges) can have 150K+ entries.
+                // Read each length prefix and skip the string data in bulk chunks
+                // to avoid 300K+ individual syscalls.
+                let mut skip_buf = vec![0u8; 65536]; // 64KB reusable buffer
                 for _ in 0..count {
-                    let len = read_u64(r)? as i64;
-                    r.seek(SeekFrom::Current(len))?;
+                    let len = read_u64(r)? as usize;
+                    // Skip by reading into buffer (faster than seek on Windows BufReader)
+                    let mut remaining = len;
+                    while remaining > 0 {
+                        let chunk = remaining.min(skip_buf.len());
+                        r.read_exact(&mut skip_buf[..chunk])?;
+                        remaining -= chunk;
+                    }
                 }
             } else if let Some(elem_size) = scalar_size(elem_type) {
                 let total = elem_size.saturating_mul(count) as i64;
@@ -473,9 +482,20 @@ pub fn read_gguf_header(path: &Path) -> io::Result<GgufMetadata> {
     }
 
     // -- Read KV pairs --
-    let mut kv = HashMap::with_capacity(n_kv as usize);
+    // Early exit optimization: we only need general.*, <arch>.*, and
+    // tokenizer.chat_template. The huge tokenizer.ggml.tokens/merges arrays
+    // (150K+ entries each) come after these. Once we hit a tokenizer.ggml.*
+    // array key, we have everything we need — stop reading immediately.
+    let mut kv = HashMap::with_capacity(64); // we only keep ~30 keys
     for _ in 0..n_kv {
         let key = read_string(&mut r)?;
+
+        // Skip tokenizer arrays entirely — they're huge and we don't need them
+        if key.starts_with("tokenizer.ggml.") && key != "tokenizer.ggml.model" && key != "tokenizer.ggml.pre" {
+            // We've passed all the metadata we need — bail out early
+            break;
+        }
+
         let value = read_value(&mut r)?;
         kv.insert(key, value);
     }

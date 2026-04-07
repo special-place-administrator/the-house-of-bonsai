@@ -85,6 +85,9 @@ fn App() -> Element {
         ModelCatalog::scan(&model_root, &cfg.recent_models).entries
     });
 
+    // Cache system resources — detect once, reuse everywhere
+    let cached_resources = use_signal(|| SystemResources::detect());
+
     let mut pm: Signal<Option<SharedProcessManager>> = use_signal(|| None);
     let mut status_text = use_signal(|| "Stopped".to_string());
     let mut status_color = use_signal(|| "#888".to_string());
@@ -193,7 +196,7 @@ fn App() -> Element {
     };
 
     let on_auto_tune = move |_| {
-        let res = SystemResources::detect();
+        let res = cached_resources.read().clone();
         let mut cfg = config.write();
         let mut last_threads = (0u32, 0u32);
         for i in 0..cfg.slots.len() {
@@ -276,7 +279,7 @@ fn App() -> Element {
             div { class: "tab-content",
                 match active_tab.read().as_str() {
                     "launch" => rsx! {
-                        LaunchTab { config, model_list, pm, message }
+                        LaunchTab { config, model_list, pm, message, cached_resources }
                     },
                     "advanced" => rsx! {
                         AdvancedTab { config, repo_root: repo_root.read().clone() }
@@ -301,6 +304,7 @@ fn LaunchTab(
     model_list: Signal<Vec<ModelEntry>>,
     pm: Signal<Option<SharedProcessManager>>,
     message: Signal<Option<(String, bool)>>,
+    cached_resources: Signal<SystemResources>,
 ) -> Element {
     let slot_count = config.read().slots.len();
 
@@ -312,6 +316,7 @@ fn LaunchTab(
                     model_list,
                     pm,
                     message,
+                    cached_resources,
                     index: i,
                     can_delete: slot_count > 1,
                 }
@@ -339,6 +344,7 @@ fn ModelCard(
     model_list: Signal<Vec<ModelEntry>>,
     pm: Signal<Option<SharedProcessManager>>,
     message: Signal<Option<(String, bool)>>,
+    cached_resources: Signal<SystemResources>,
     index: usize,
     can_delete: bool,
 ) -> Element {
@@ -448,8 +454,8 @@ fn ModelCard(
                                     }
                                 }
 
-                                // Auto-tune this slot
-                                let res = SystemResources::detect();
+                                // Auto-tune this slot (uses cached resources)
+                                let res = cached_resources.read().clone();
                                 let (threads, http_threads) = res.auto_tune(s, &val, meta.as_ref());
                                 c.threads = threads.to_string();
                                 c.threads_http = http_threads.to_string();

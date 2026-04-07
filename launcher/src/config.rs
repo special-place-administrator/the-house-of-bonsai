@@ -296,7 +296,35 @@ impl LauncherConfig {
             }
         }
 
+        // Re-detect capabilities on every load — ensures new detection
+        // logic applies to previously saved configs.
+        cfg.redetect_capabilities();
+
         cfg
+    }
+
+    /// Re-read GGUF metadata for each slot and apply capability-based settings.
+    pub fn redetect_capabilities(&mut self) {
+        for slot in &mut self.slots {
+            if slot.model_path.is_empty() { continue; }
+            if let Some(meta) = crate::gguf::ModelMetadata::from_file(&slot.model_path) {
+                if meta.capabilities.embedding {
+                    slot.embedding_mode = true;
+                    slot.cache_type_k = "f16".into();
+                    slot.cache_type_v = "f16".into();
+                    slot.flash_attention = "off".into();
+                    slot.turbo_layer_adaptive = "off".into();
+                    if slot.parallel == "1" { slot.parallel = "4".into(); }
+                } else {
+                    slot.embedding_mode = false;
+                }
+                if let Some(ref name) = meta.name {
+                    if slot.alias.starts_with("Model (port") {
+                        slot.alias = name.clone();
+                    }
+                }
+            }
+        }
     }
 
     pub fn save(&self) -> Result<(), String> {
