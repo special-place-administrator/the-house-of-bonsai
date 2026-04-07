@@ -57,11 +57,44 @@ if (-not (Test-Path $llamaDir)) {
     Write-Host "  llama.cpp directory exists, skipping clone."
 }
 
-# Step 3: Build llama.cpp with CUDA
-Write-Host "[3/5] Building llama.cpp with CUDA..." -ForegroundColor Yellow
+# Step 3: Build llama.cpp with available GPU backends
+Write-Host "[3/5] Building llama.cpp..." -ForegroundColor Yellow
 
 $buildDir = Join-Path $llamaDir "build"
-$configureCmd = "cmake -S `"$llamaDir`" -B `"$buildDir`" -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DGGML_NATIVE=ON -DGGML_CUDA_FA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON -DGGML_CCACHE=OFF"
+$backendFlags = "-DGGML_NATIVE=ON -DGGML_CCACHE=OFF"
+
+# Detect CUDA
+$cudaPath = $env:CUDA_PATH
+if ([string]::IsNullOrWhiteSpace($cudaPath) -or -not (Test-Path $cudaPath)) {
+    # Try to find any CUDA installation
+    $cudaSearch = Get-ChildItem "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA" -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
+    if ($cudaSearch) { $cudaPath = $cudaSearch.FullName; $env:CUDA_PATH = $cudaPath }
+}
+if (-not [string]::IsNullOrWhiteSpace($cudaPath) -and (Test-Path $cudaPath)) {
+    Write-Host "  CUDA found: $cudaPath" -ForegroundColor Green
+    $backendFlags += " -DGGML_CUDA=ON -DGGML_CUDA_FA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON"
+    $env:PATH = "$cudaPath\bin;$env:PATH"
+} else {
+    Write-Host "  CUDA not found — skipping CUDA backend" -ForegroundColor DarkYellow
+}
+
+# Detect Vulkan
+$vulkanSdk = $env:VULKAN_SDK
+if ([string]::IsNullOrWhiteSpace($vulkanSdk)) {
+    $vulkanSearch = Get-ChildItem "C:\VulkanSDK" -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
+    if ($vulkanSearch) { $vulkanSdk = $vulkanSearch.FullName; $env:VULKAN_SDK = $vulkanSdk }
+}
+if (-not [string]::IsNullOrWhiteSpace($vulkanSdk) -and (Test-Path "$vulkanSdk\Include\vulkan\vulkan.h")) {
+    Write-Host "  Vulkan SDK found: $vulkanSdk" -ForegroundColor Green
+    $backendFlags += " -DGGML_VULKAN=ON"
+} else {
+    Write-Host "  Vulkan SDK not found — skipping Vulkan backend" -ForegroundColor DarkYellow
+    Write-Host "  Install from https://vulkan.lunarg.com/sdk/home for AMD/Intel GPU support" -ForegroundColor DarkGray
+}
+
+Write-Host "  Backend flags: $backendFlags" -ForegroundColor Gray
+
+$configureCmd = "cmake -S `"$llamaDir`" -B `"$buildDir`" -G Ninja -DCMAKE_BUILD_TYPE=Release $backendFlags"
 $buildCmd = "cmake --build `"$buildDir`" --config Release --parallel 12 --target llama-server"
 
 # Run in VS dev shell

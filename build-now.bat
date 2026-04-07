@@ -1,5 +1,12 @@
 @echo off
-REM Try VS 2026 first, fall back to VS 2022
+setlocal enabledelayedexpansion
+
+REM ==========================================================================
+REM  The House of Bonsai — Multi-Backend Build Script
+REM  Builds llama-server with all available GPU backends + Rust launcher
+REM ==========================================================================
+
+REM --- Visual Studio ---
 if exist "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" (
     call "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
 ) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat" (
@@ -8,31 +15,121 @@ if exist "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\Vs
     echo ERROR: Visual Studio 2026 or 2022 not found
     exit /b 1
 )
-set CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2
-set PATH=%CUDA_PATH%\bin;%PATH%
 
+set PROJECT_ROOT=E:\project\the-house-of-bonsai
+set LLAMA_SRC=%PROJECT_ROOT%\llama-cpp
+set BUILD_DIR=%LLAMA_SRC%\build
+set BIN_DIR=%BUILD_DIR%\bin
+
+REM --- Detect available backends ---
+set HAS_CUDA=0
+set HAS_VULKAN=0
+
+REM Check CUDA
+if exist "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2\bin\nvcc.exe" (
+    set CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2
+    set PATH=!CUDA_PATH!\bin;!PATH!
+    set HAS_CUDA=1
+    echo [DETECT] CUDA 13.2 found
+) else (
+    for /d %%D in ("C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v*") do (
+        if exist "%%D\bin\nvcc.exe" (
+            set CUDA_PATH=%%D
+            set PATH=!CUDA_PATH!\bin;!PATH!
+            set HAS_CUDA=1
+            echo [DETECT] CUDA found at %%D
+        )
+    )
+)
+if !HAS_CUDA!==0 echo [DETECT] No CUDA Toolkit found — skipping CUDA backend
+
+REM Check Vulkan
+if defined VULKAN_SDK (
+    if exist "%VULKAN_SDK%\Include\vulkan\vulkan.h" (
+        set HAS_VULKAN=1
+        echo [DETECT] Vulkan SDK found at %VULKAN_SDK%
+    )
+) else (
+    for /d %%D in ("C:\VulkanSDK\*") do (
+        if exist "%%D\Include\vulkan\vulkan.h" (
+            set VULKAN_SDK=%%D
+            set HAS_VULKAN=1
+            echo [DETECT] Vulkan SDK found at %%D
+        )
+    )
+)
+if !HAS_VULKAN!==0 echo [DETECT] No Vulkan SDK found — skipping Vulkan backend
+
+REM --- Build CMake flags ---
+set CMAKE_BACKEND_FLAGS=-DGGML_NATIVE=ON -DGGML_CCACHE=OFF
+
+if !HAS_CUDA!==1 (
+    set CMAKE_BACKEND_FLAGS=!CMAKE_BACKEND_FLAGS! -DGGML_CUDA=ON -DGGML_CUDA_FA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON
+)
+
+if !HAS_VULKAN!==1 (
+    set CMAKE_BACKEND_FLAGS=!CMAKE_BACKEND_FLAGS! -DGGML_VULKAN=ON
+)
+
+if !HAS_CUDA!==0 if !HAS_VULKAN!==0 (
+    echo.
+    echo [WARNING] No GPU SDK detected — building CPU-only backend
+    echo           Install CUDA Toolkit or Vulkan SDK for GPU acceleration
+    echo.
+)
+
+echo.
 echo === Configuring CMake ===
-cmake -S "E:\project\the-house-of-bonsai\llama-cpp" -B "E:\project\the-house-of-bonsai\llama-cpp\build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DGGML_NATIVE=ON -DGGML_CUDA_FA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON -DGGML_CCACHE=OFF
+echo Backends: CUDA=!HAS_CUDA! Vulkan=!HAS_VULKAN!
+echo Flags: !CMAKE_BACKEND_FLAGS!
+echo.
+
+cmake -S "%LLAMA_SRC%" -B "%BUILD_DIR%" -G Ninja -DCMAKE_BUILD_TYPE=Release !CMAKE_BACKEND_FLAGS!
 if %ERRORLEVEL% NEQ 0 (
     echo CMake configure FAILED
     exit /b 1
 )
 
+echo.
 echo === Building llama-server ===
-cmake --build "E:\project\the-house-of-bonsai\llama-cpp\build" --config Release --parallel 12 --target llama-server
+cmake --build "%BUILD_DIR%" --config Release --parallel 12 --target llama-server
 if %ERRORLEVEL% NEQ 0 (
     echo Build FAILED
     exit /b 1
 )
 
+REM --- Verify built backends ---
+echo.
+echo === Built Backends ===
+if exist "%BIN_DIR%\ggml-cuda.dll" (echo   [OK] CUDA backend: ggml-cuda.dll) else (echo   [--] CUDA backend: not built)
+if exist "%BIN_DIR%\ggml-vulkan.dll" (echo   [OK] Vulkan backend: ggml-vulkan.dll) else (echo   [--] Vulkan backend: not built)
+if exist "%BIN_DIR%\ggml-cpu.dll" (echo   [OK] CPU backend: ggml-cpu.dll) else (echo   [--] CPU backend: not built)
+
+REM --- Build Rust launcher ---
+echo.
 echo === Building launcher ===
-cd "E:\project\the-house-of-bonsai\launcher"
+pushd "%PROJECT_ROOT%\launcher"
 cargo build --release
 if %ERRORLEVEL% NEQ 0 (
+    popd
     echo Launcher build FAILED
     exit /b 1
 )
+popd
 
-echo === BUILD COMPLETE ===
-echo llama-server: E:\project\the-house-of-bonsai\llama-cpp\build\bin\llama-server.exe
-echo launcher: E:\project\the-house-of-bonsai\launcher\target\release\turboquant-launcher.exe
+echo.
+echo ===================================================
+echo   BUILD COMPLETE
+echo ===================================================
+echo   llama-server: %BIN_DIR%\llama-server.exe
+echo   launcher:     %PROJECT_ROOT%\launcher\target\release\turboquant-launcher.exe
+echo.
+echo   Backends:
+if exist "%BIN_DIR%\ggml-cuda.dll" echo     CUDA   — NVIDIA GPU acceleration
+if exist "%BIN_DIR%\ggml-vulkan.dll" echo     Vulkan — AMD / Intel / NVIDIA GPU acceleration
+echo     CPU    — universal fallback
+echo.
+echo   To add Vulkan support: install Vulkan SDK from https://vulkan.lunarg.com/sdk/home
+echo ===================================================
+
+endlocal
