@@ -4,6 +4,7 @@ mod config;
 mod gguf;
 mod huggingface;
 mod models;
+mod prism;
 mod process;
 mod resources;
 
@@ -109,6 +110,14 @@ fn App() -> Element {
     let mut any_running = use_signal(|| false);
     let mut active_tab = use_signal(|| "launch".to_string());
     let mut message: Signal<Option<(String, bool)>> = use_signal(|| None);
+
+    // Prism deployment modal state
+    let mut show_prism_modal = use_signal(|| false);
+    let mut prism_readiness: Signal<Option<prism::PrismReadiness>> = use_signal(|| None);
+    let mut harness_probes: Signal<Vec<prism::HarnessProbe>> = use_signal(Vec::new);
+    let mut prism_deploy_log: Signal<Vec<String>> = use_signal(Vec::new);
+    let mut prism_deploying = use_signal(|| false);
+    let prism_dashboard_port = use_signal(|| 3333u16);
 
     // Initialize process manager once
     use_effect(move || {
@@ -239,6 +248,22 @@ fn App() -> Element {
         }
     };
 
+    let on_deploy_prism = move |_| {
+        show_prism_modal.set(true);
+        prism_deploy_log.set(Vec::new());
+        // Run detection in background
+        let root = repo_root.read().clone();
+        let cfg = config.read().clone();
+        spawn(async move {
+            // Detect harnesses
+            let probes = prism::detect_all_harnesses();
+            harness_probes.set(probes);
+            // Check readiness
+            let readiness = prism::check_prism_readiness(&cfg, &root).await;
+            prism_readiness.set(Some(readiness));
+        });
+    };
+
     rsx! {
         style { {include_str!("../assets/style.css")} }
 
@@ -257,6 +282,12 @@ fn App() -> Element {
                 button { class: "btn", onclick: on_refresh_models, "🔄 Models" }
                 button { class: "btn", onclick: on_browse_folder, "📂 Browse" }
                 button { class: "btn btn-tune", onclick: on_auto_tune, "⚡ Auto-Tune" }
+                button {
+                    class: if *any_running.read() { "btn btn-prism" } else { "btn btn-prism-disabled" },
+                    disabled: !*any_running.read(),
+                    onclick: on_deploy_prism,
+                    "🧠 Deploy Prism"
+                }
                 div { class: "status-badge", style: "color: {status_color};",
                     "● {status_text}"
                 }
@@ -302,6 +333,21 @@ fn App() -> Element {
                         LogsTab { log_lines, status_text: status_text.read().clone() }
                     },
                     _ => rsx! { div { "Unknown tab" } },
+                }
+            }
+
+            // Prism deployment modal
+            if *show_prism_modal.read() {
+                DeployPrismModal {
+                    show_prism_modal,
+                    prism_readiness,
+                    harness_probes,
+                    prism_deploy_log,
+                    prism_deploying,
+                    prism_dashboard_port,
+                    config: config.clone(),
+                    repo_root: repo_root.read().clone(),
+                    message,
                 }
             }
         }
@@ -1037,6 +1083,267 @@ fn SlotSelectField(
                     }
                 }
             }
+        }
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Deploy Prism MCP Modal
+// ---------------------------------------------------------------------------
+
+#[component]
+fn DeployPrismModal(
+    mut show_prism_modal: Signal<bool>,
+    mut prism_readiness: Signal<Option<prism::PrismReadiness>>,
+    mut harness_probes: Signal<Vec<prism::HarnessProbe>>,
+    mut prism_deploy_log: Signal<Vec<String>>,
+    mut prism_deploying: Signal<bool>,
+    prism_dashboard_port: Signal<u16>,
+    config: Signal<LauncherConfig>,
+    repo_root: PathBuf,
+    mut message: Signal<Option<(String, bool)>>,
+) -> Element {
+    let readiness = prism_readiness.read().clone();
+    let probes = harness_probes.read().clone();
+    let deploying = *prism_deploying.read();
+    let log = prism_deploy_log.read().clone();
+    let dashboard_port = *prism_dashboard_port.read();
+
+    let selected_count = probes.iter().filter(|p| p.selected).count();
+    let all_ready = readiness.as_ref().map(|r| r.all_ok()).unwrap_or(false);
+    let can_finish = all_ready && selected_count > 0 && !deploying;
+
+    // Build Prism handler
+    let root_for_build = repo_root.clone();
+    let on_build_prism = move |_| {
+        let root = root_for_build.clone();
+        let root2 = root.clone();
+        let cfg = config.read().clone();
+        prism_deploying.set(true);
+        prism_deploy_log.with_mut(|l| l.push("Building Prism MCP...".into()));
+        spawn(async move {
+            let result = tokio::task::spawn_blocking(move || prism::build_prism(&root))
+                .await
+                .unwrap_or_else(|e| Err(format!("Build task panicked: {}", e)));
+            match result {
+                Ok(msg) => {
+                    prism_deploy_log.with_mut(|l| l.push(format!("✓ {}", msg)));
+                }
+                Err(err) => {
+                    prism_deploy_log.with_mut(|l| l.push(format!("✗ {}", err)));
+                }
+            }
+            // Re-check readiness
+            let cfg = config.read().clone();
+            let r = prism::check_prism_readiness(&cfg, &root2).await;
+            prism_readiness.set(Some(r));
+            prism_deploying.set(false);
+        });
+    };
+
+    // FINISH handler
+    let root_for_deploy = repo_root.clone();
+    let dp = dashboard_port;
+    let on_finish = move |_| {
+        let probes_snapshot = harness_probes.read().clone();
+        let cfg = config.read().clone();
+        let root = root_for_deploy.clone();
+        let dp = dp;
+        prism_deploying.set(true);
+        spawn(async move {
+            // Get readiness for building the entry
+            let readiness = prism::check_prism_readiness(&cfg, &root).await;
+            let entry = prism::build_mcp_entry(&readiness, &cfg, dp);
+
+            for probe in &probes_snapshot {
+                if !probe.selected {
+                    continue;
+                }
+                let label = probe.harness.label();
+                match prism::deploy_to_harness(probe, &entry) {
+                    Ok(msg) => {
+                        prism_deploy_log.with_mut(|l| l.push(format!("✓ {} — {}", label, msg)));
+                    }
+                    Err(err) => {
+                        prism_deploy_log.with_mut(|l| l.push(format!("✗ {} — {}", label, err)));
+                    }
+                }
+            }
+            prism_deploy_log.with_mut(|l| {
+                l.push(String::new());
+                l.push("Deployment complete! Restart your AI tools to activate Prism.".into());
+            });
+            prism_deploying.set(false);
+        });
+    };
+
+    // Open dashboard handler
+    let on_open_dashboard = move |_| {
+        let host = config.read().host.clone();
+        let _ = open::that(format!("http://{}:{}", host, dashboard_port));
+    };
+
+    rsx! {
+        // Modal overlay
+        div {
+            class: "modal-overlay",
+            onclick: move |_| show_prism_modal.set(false),
+
+            div {
+                class: "modal",
+                onclick: move |e| e.stop_propagation(),
+
+                // Header
+                div { class: "modal-header",
+                    span { class: "modal-title", "🧠 Deploy Prism MCP" }
+                    button {
+                        class: "modal-close",
+                        onclick: move |_| show_prism_modal.set(false),
+                        "✕"
+                    }
+                }
+
+                // Pre-flight checks
+                div { class: "modal-section",
+                    div { class: "modal-section-title", "Pre-flight Checks" }
+
+                    if let Some(r) = readiness.as_ref() {
+                        PreflightRow { label: "Text endpoint", ok: r.text_ok }
+                        PreflightRow { label: "Embedding endpoint", ok: r.embedding_ok }
+                        PreflightRow { label: "Embedding dims (768)", ok: r.embedding_dims_ok }
+                        PreflightRow { label: "Node.js installed", ok: r.node_available }
+                        PreflightRow { label: "npm installed", ok: r.npm_available }
+
+                        div { class: "preflight-row",
+                            span {
+                                class: if r.prism_built { "preflight-ok" } else { "preflight-fail" },
+                                if r.prism_built { "●" } else { "✗" }
+                            }
+                            span { "Prism built" }
+                            if !r.prism_built {
+                                button {
+                                    class: "btn-build",
+                                    disabled: deploying,
+                                    onclick: on_build_prism,
+                                    if deploying { "Building..." } else { "Build" }
+                                }
+                            }
+                        }
+                    } else {
+                        div { class: "preflight-row", "Checking..." }
+                    }
+                }
+
+                // Harness selection
+                div { class: "modal-section",
+                    div { class: "modal-section-title", "Deploy to Harnesses" }
+
+                    for (i, probe) in probes.iter().enumerate() {
+                        div { class: "harness-row",
+                            input {
+                                r#type: "checkbox",
+                                checked: probe.selected && probe.is_available(),
+                                disabled: !probe.is_available(),
+                                onchange: {
+                                    let i = i;
+                                    move |e: Event<FormData>| {
+                                        let checked = e.value() == "true";
+                                        harness_probes.with_mut(|probes| {
+                                            if let Some(p) = probes.get_mut(i) {
+                                                p.selected = checked;
+                                            }
+                                        });
+                                    }
+                                },
+                            }
+                            span { class: "harness-label", "{probe.harness.label()}" }
+                            match &probe.status {
+                                prism::HarnessStatus::Checking => rsx! {
+                                    span { class: "harness-checking", "..." }
+                                },
+                                prism::HarnessStatus::Found(_) => rsx! {
+                                    span { class: "harness-found", "● Found" }
+                                },
+                                prism::HarnessStatus::ManualPath(_) => rsx! {
+                                    span { class: "harness-found", "● Manual" }
+                                },
+                                prism::HarnessStatus::NotFound(reason) => rsx! {
+                                    span { class: "harness-missing", "✗ {reason}" }
+                                    button {
+                                        class: "btn-browse-small",
+                                        onclick: {
+                                            let i = i;
+                                            move |_| {
+                                                if let Some(path) = rfd::FileDialog::new()
+                                                    .set_title("Select MCP config file")
+                                                    .add_filter("JSON", &["json"])
+                                                    .pick_file()
+                                                {
+                                                    harness_probes.with_mut(|probes| {
+                                                        if let Some(p) = probes.get_mut(i) {
+                                                            p.status = prism::HarnessStatus::ManualPath(path);
+                                                            p.selected = true;
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                        },
+                                        "Browse..."
+                                    }
+                                },
+                            }
+                        }
+                    }
+                }
+
+                // FINISH button
+                div { class: "modal-section",
+                    button {
+                        class: if can_finish { "btn-finish" } else { "btn-finish btn-finish-disabled" },
+                        disabled: !can_finish,
+                        onclick: on_finish,
+                        if deploying {
+                            "Deploying..."
+                        } else {
+                            "FINISH — Deploy to {selected_count} harness(es)"
+                        }
+                    }
+                }
+
+                // Deploy log
+                if !log.is_empty() {
+                    div { class: "deploy-log",
+                        for line in log.iter() {
+                            div { class: "deploy-log-line", "{line}" }
+                        }
+                    }
+                }
+
+                // Open dashboard button (shown after deployment)
+                if log.iter().any(|l| l.contains("Deployment complete")) {
+                    div { class: "modal-section",
+                        button {
+                            class: "btn-dashboard",
+                            onclick: on_open_dashboard,
+                            "🏛 Open Mind Palace Dashboard"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn PreflightRow(label: &'static str, ok: bool) -> Element {
+    rsx! {
+        div { class: "preflight-row",
+            span {
+                class: if ok { "preflight-ok" } else { "preflight-fail" },
+                if ok { "●" } else { "✗" }
+            }
+            span { "{label}" }
         }
     }
 }
