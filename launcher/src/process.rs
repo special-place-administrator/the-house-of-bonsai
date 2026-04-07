@@ -169,7 +169,17 @@ impl ProcessManager {
         }
 
         #[cfg(target_os = "windows")]
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        {
+            // Suppress missing DLL error dialogs (e.g. cublas64_13.dll when CUDA
+            // runtime isn't installed). SEM_FAILCRITICALERRORS lets llama-server
+            // fail gracefully instead of showing a Windows popup.
+            unsafe {
+                #[link(name = "kernel32")]
+                unsafe extern "system" { fn SetErrorMode(mode: u32) -> u32; }
+                SetErrorMode(0x0001); // SEM_FAILCRITICALERRORS
+            }
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
 
         let mut child = cmd.spawn()
             .map_err(|e| format!("Slot {}: Failed to spawn llama-server: {e}", index))?;
