@@ -40,6 +40,15 @@ launcher\target\release\turboquant-launcher.exe
 
 Select a model, click **Start**, then **Chat**. Add more models with **+ Add Model**.
 
+### Pre-built Models
+
+| Model | Size | Purpose | Download |
+|-------|------|---------|----------|
+| **Bonsai-8B** (Q1_0) | 1.15 GB | Text/chat, tool use, thinking | [HuggingFace](https://huggingface.co/prism-ml/Bonsai-8B-gguf/resolve/main/Bonsai-8B.gguf) |
+| **nomic-embed-text-v2-moe** | 1.8 GB | Embeddings (768-dim) | [HuggingFace](https://huggingface.co/nomic-ai/nomic-embed-text-v2-moe/resolve/main/nomic-embed-text-v2-moe.f32.gguf) |
+
+Place downloaded `.gguf` files in the `models/` folder, or use **Browse** in the launcher to point to any directory.
+
 ---
 
 ## Built on the Bleeding Edge
@@ -305,4 +314,6 @@ In the launcher UI:
 
 ## License
 
-Apache 2.0 — matching Bonsai-8B and llama.cpp upstream licenses.
+The House of Bonsai is licensed under [PolyForm Noncommercial License 1.0.0](./LICENSE). The official license text is also available from the [PolyForm Project](https://polyformproject.org/licenses/noncommercial/1.0.0/).
+
+You may inspect, study, and use the source code for noncommercial purposes, but commercial use is prohibited unless separately licensed.
