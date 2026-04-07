@@ -314,6 +314,12 @@ In the launcher UI:
 
 ## License
 
-The House of Bonsai is licensed under [PolyForm Noncommercial License 1.0.0](./LICENSE). The official license text is also available from the [PolyForm Project](https://polyformproject.org/licenses/noncommercial/1.0.0/).
+**The House of Bonsai launcher** (everything under `launcher/`, `scripts/`, `patches/`) is licensed under [PolyForm Noncommercial License 1.0.0](./LICENSE). The official license text is also available from the [PolyForm Project](https://polyformproject.org/licenses/noncommercial/1.0.0/).
 
 You may inspect, study, and use the source code for noncommercial purposes, but commercial use is prohibited unless separately licensed.
+
+**Third-party components** retain their original licenses:
+- llama.cpp / TurboQuant fork — MIT License
+- Bonsai-8B model — Apache 2.0 (PrismML)
+- nomic-embed-text-v2-moe — Apache 2.0 (Nomic AI)
+- Dioxus — MIT / Apache 2.0
