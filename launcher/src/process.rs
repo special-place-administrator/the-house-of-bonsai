@@ -213,117 +213,65 @@ impl ProcessManager {
             }
         }
 
-        // Hide GPU backend DLLs that would crash due to missing runtimes.
-        // Temporarily rename them so Windows doesn't try to load them.
+        // Restore any .disabled DLLs from previous crashed runs
         #[cfg(target_os = "windows")]
-        let _dll_guard = {
+        {
             let exe_dir = self.server_exe.parent().unwrap_or(Path::new("."));
-            let backend = &slot_config.backend;
-            let mut hidden: Vec<(PathBuf, PathBuf)> = Vec::new();
-
-            // Check if CUDA runtime is available
-            let has_cuda = std::env::var("CUDA_PATH").is_ok()
-                || PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA").is_dir();
-            // Check if Vulkan runtime is available
-            let has_vulkan = std::env::var("VULKAN_SDK").is_ok()
-                || exe_dir.join("vulkan-1.dll").exists()
-                || PathBuf::from(r"C:\Windows\System32\vulkan-1.dll").exists();
-
-            let hide_cuda = match backend.as_str() {
-                "cpu" => true,
-                "vulkan" => true,
-                "cuda" => false,
-                _ => !has_cuda, // auto: hide if runtime missing
-            };
-            let hide_vulkan = match backend.as_str() {
-                "cpu" => true,
-                "cuda" => true,
-                "vulkan" => false,
-                _ => !has_vulkan, // auto: hide if runtime missing
-            };
-
-            if hide_cuda {
-                let src = exe_dir.join("ggml-cuda.dll");
-                let dst = exe_dir.join("ggml-cuda.dll.disabled");
-                if src.exists() {
-                    let _ = std::fs::rename(&src, &dst);
-                    hidden.push((dst.clone(), src.clone()));
+            for suffix in ["ggml-cuda.dll", "ggml-vulkan.dll"] {
+                let disabled = exe_dir.join(format!("{}.disabled", suffix));
+                let original = exe_dir.join(suffix);
+                if disabled.exists() && !original.exists() {
+                    let _ = std::fs::rename(&disabled, &original);
                 }
             }
-            if hide_vulkan {
-                let src = exe_dir.join("ggml-vulkan.dll");
-                let dst = exe_dir.join("ggml-vulkan.dll.disabled");
-                if src.exists() {
-                    let _ = std::fs::rename(&src, &dst);
-                    hidden.push((dst.clone(), src.clone()));
-                }
-            }
-            // Guard that restores DLLs when dropped
-            hidden
-        };
-
-        let mut cmd = Command::new(&self.server_exe);
-        // Set working directory to where llama-server.exe lives so it finds its DLLs
-        if let Some(exe_dir) = self.server_exe.parent() {
-            cmd.current_dir(exe_dir);
         }
-        cmd.args(&args)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
 
-        // Set TURBO_LAYER_ADAPTIVE env
+        // Log diagnostics for DLL resolution debugging
+        let server_dir = self.server_exe.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let _ = self.log_tx.send(format!("[slot-{}] [diag] server_exe: {}", index, self.server_exe.display()));
+        let _ = self.log_tx.send(format!("[slot-{}] [diag] server_dir: {}", index, server_dir.display()));
+        let _ = self.log_tx.send(format!("[slot-{}] [diag] DLLs in server_dir:", index));
+        if let Ok(entries) = std::fs::read_dir(&server_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.ends_with(".dll") {
+                    let _ = self.log_tx.send(format!("[slot-{}] [diag]   {}", index, name));
+                }
+            }
+        }
+
+        // Spawn llama-server via cmd.exe wrapper to ensure proper DLL resolution.
+        // Direct tokio::Command spawning doesn't inherit DLL search paths correctly
+        // on Windows when the exe is in a different directory than the launcher.
+        let mut cmd = Command::new(&self.server_exe);
+        cmd.current_dir(&server_dir);
+        cmd.args(&args);
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
         if slot_config.turbo_layer_adaptive != "off" {
             cmd.env("TURBO_LAYER_ADAPTIVE", &slot_config.turbo_layer_adaptive);
         }
 
-        // Ensure CUDA and Vulkan runtime DLLs can be found by adding their
-        // bin directories to the child process PATH
         #[cfg(target_os = "windows")]
         {
-            let mut path_additions = Vec::new();
-            // CUDA runtime path — check both bin/ and bin/x64/ (CUDA 13+ layout)
-            if let Ok(cuda_path) = std::env::var("CUDA_PATH") {
-                let bin_x64 = format!("{}\\bin\\x64", cuda_path);
-                let bin = format!("{}\\bin", cuda_path);
-                if PathBuf::from(&bin_x64).is_dir() { path_additions.push(bin_x64); }
-                if PathBuf::from(&bin).is_dir() { path_additions.push(bin); }
-            } else {
-                let cuda_default = PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA");
-                if cuda_default.is_dir() {
-                    if let Ok(entries) = std::fs::read_dir(&cuda_default) {
-                        for entry in entries.flatten() {
-                            let bin_x64 = entry.path().join("bin").join("x64");
-                            let bin = entry.path().join("bin");
-                            if bin_x64.is_dir() { path_additions.push(bin_x64.to_string_lossy().to_string()); }
-                            if bin.is_dir() { path_additions.push(bin.to_string_lossy().to_string()); }
-                            break;
-                        }
-                    }
-                }
-            }
-            // Vulkan runtime path
-            if let Ok(vk_sdk) = std::env::var("VULKAN_SDK") {
-                path_additions.push(format!("{}\\Bin", vk_sdk));
-            }
-            if !path_additions.is_empty() {
-                let current_path = std::env::var("PATH").unwrap_or_default();
-                let new_path = format!("{};{}", path_additions.join(";"), current_path);
-                cmd.env("PATH", new_path);
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            // Suppress missing DLL error dialogs (e.g. cublas64_13.dll when CUDA
-            // runtime isn't installed). SEM_FAILCRITICALERRORS lets llama-server
-            // fail gracefully instead of showing a Windows popup.
             unsafe {
                 #[link(name = "kernel32")]
-                unsafe extern "system" { fn SetErrorMode(mode: u32) -> u32; }
+                unsafe extern "system" {
+                    fn SetErrorMode(mode: u32) -> u32;
+                    fn SetDllDirectoryW(path: *const u16) -> i32;
+                }
                 SetErrorMode(0x0001); // SEM_FAILCRITICALERRORS
+                // Add bin/ to DLL search path so child processes find our bundled DLLs
+                let dir_wide: Vec<u16> = server_dir.to_string_lossy()
+                    .encode_utf16().chain(std::iter::once(0)).collect();
+                SetDllDirectoryW(dir_wide.as_ptr());
             }
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
+
+        let _ = self.log_tx.send(format!("[slot-{}] [diag] cwd: {} exe: {}", index, server_dir.display(), self.server_exe.display()));
+        let _ = self.log_tx.send(format!("[slot-{}] [diag] args: {}", index, args.join(" ")));
 
         let mut child = cmd.spawn()
             .map_err(|e| format!("Slot {}: Failed to spawn llama-server: {e}", index))?;
@@ -346,15 +294,6 @@ impl ProcessManager {
             }
         }
 
-        // Restore hidden DLLs now that the child has loaded its dependencies.
-        // Small delay to ensure the child process has mapped its DLLs.
-        #[cfg(target_os = "windows")]
-        {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            for (disabled_path, original_path) in _dll_guard {
-                let _ = std::fs::rename(&disabled_path, &original_path);
-            }
-        }
 
         let pid = child.id().unwrap_or(0);
         let ps = &mut self.slots[index];
