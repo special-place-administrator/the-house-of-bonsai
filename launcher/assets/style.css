@@ -2,8 +2,8 @@
 
 body {
     font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-    background: #1a1a2e;
-    color: #e0e0e0;
+    background: #2b2d31;
+    color: #f0f0f0;
     font-size: 14px;
     overflow: hidden;
     height: 100vh;
@@ -28,31 +28,31 @@ body {
     transition: background 0.3s;
 }
 
-.header-stopped { background: #3d1a1a; }
-.header-running { background: #1a3d1a; }
+.header-stopped { background: #4a2828; }
+.header-running { background: #284a28; }
 
 .btn {
     padding: 8px 16px;
-    border: 1px solid #334;
+    border: 1px solid #555;
     border-radius: 6px;
-    background: #233;
-    color: #e0e0e0;
+    background: #3b3d44;
+    color: #f0f0f0;
     cursor: pointer;
     font-size: 13px;
     white-space: nowrap;
     transition: background 0.15s;
 }
-.btn:hover { background: #344; }
-.btn:active { background: #455; }
+.btn:hover { background: #4a4d55; }
+.btn:active { background: #5a5d65; }
 
-.btn-start { background: #1b5e20; border-color: #2e7d32; }
-.btn-start:hover { background: #2e7d32; }
+.btn-start { background: #2d6a30; border-color: #3e8b42; }
+.btn-start:hover { background: #3e8b42; }
 
-.btn-stop { background: #b71c1c; border-color: #c62828; }
-.btn-stop:hover { background: #c62828; }
+.btn-stop { background: #c43030; border-color: #d44; }
+.btn-stop:hover { background: #d44; }
 
-.btn-tune { background: #4a148c; border-color: #6a1b9a; }
-.btn-tune:hover { background: #6a1b9a; }
+.btn-tune { background: #5c34a4; border-color: #7b4fc7; }
+.btn-tune:hover { background: #7b4fc7; }
 
 .status-badge {
     margin-left: auto;
@@ -69,8 +69,8 @@ body {
     flex-shrink: 0;
     font-size: 13px;
 }
-.msg-error { background: #4a1515; border: 1px solid #c62828; color: #ff8a80; }
-.msg-info { background: #1a3a1a; border: 1px solid #2e7d32; color: #a5d6a7; }
+.msg-error { background: #5a2020; border: 1px solid #d44; color: #ffaaaa; }
+.msg-info { background: #204a20; border: 1px solid #3e8b42; color: #b5e6b7; }
 
 /* Tabs */
 .tabs {
@@ -83,18 +83,18 @@ body {
     padding: 8px 20px;
     border: none;
     border-radius: 6px 6px 0 0;
-    background: #16213e;
-    color: #888;
+    background: #33363d;
+    color: #999;
     cursor: pointer;
     font-size: 13px;
     transition: all 0.15s;
 }
-.tab:hover { color: #bbb; }
-.tab.active { background: #1f2f4f; color: #fff; }
+.tab:hover { color: #ccc; }
+.tab.active { background: #3d4148; color: #fff; }
 
 .tab-content {
     flex: 1;
-    background: #1f2f4f;
+    background: #3d4148;
     border-radius: 0 6px 6px 6px;
     padding: 12px;
     overflow-y: auto;
@@ -109,7 +109,7 @@ body {
 }
 
 .panel {
-    background: #16213e;
+    background: #33363d;
     border-radius: 8px;
     padding: 14px;
     flex: 1 1 300px;
@@ -117,12 +117,12 @@ body {
 }
 
 .panel h3 {
-    color: #90caf9;
+    color: #7cb8f0;
     font-size: 14px;
     font-weight: 600;
     margin-bottom: 12px;
     padding-bottom: 6px;
-    border-bottom: 1px solid #2a3a5a;
+    border-bottom: 1px solid #4a4d55;
 }
 
 /* Form fields */
@@ -136,7 +136,7 @@ body {
 
 .field label {
     font-size: 12px;
-    color: #90a4ae;
+    color: #b8bec8;
     text-align: right;
 }
 
@@ -144,10 +144,10 @@ body {
 .field select,
 .field textarea {
     padding: 6px 10px;
-    border: 1px solid #334;
+    border: 1px solid #555;
     border-radius: 4px;
-    background: #0f1a2e;
-    color: #e0e0e0;
+    background: #292b30;
+    color: #f0f0f0;
     font-size: 13px;
     font-family: inherit;
     width: 100%;
@@ -157,7 +157,7 @@ body {
 .field select:focus,
 .field textarea:focus {
     outline: none;
-    border-color: #4fc3f7;
+    border-color: #6ab0f0;
 }
 
 .field select {
@@ -176,19 +176,19 @@ body {
     align-items: center;
     gap: 6px;
     font-size: 12px;
-    color: #90a4ae;
+    color: #b8bec8;
     cursor: pointer;
 }
 
 /* Command preview */
 .cmd-preview {
-    background: #0a0f1e;
-    border: 1px solid #223;
+    background: #1e2025;
+    border: 1px solid #444;
     border-radius: 4px;
     padding: 10px;
     font-family: 'Cascadia Code', 'Consolas', monospace;
     font-size: 12px;
-    color: #81d4fa;
+    color: #a0d8f8;
     white-space: pre-wrap;
     word-break: break-all;
     max-height: 300px;
@@ -197,8 +197,8 @@ body {
 
 /* Log viewer */
 .log-viewer {
-    background: #0a0f1e;
-    border: 1px solid #223;
+    background: #1e2025;
+    border: 1px solid #444;
     border-radius: 4px;
     padding: 8px;
     height: calc(100vh - 200px);
@@ -208,7 +208,7 @@ body {
 .log-viewer pre {
     font-family: 'Cascadia Code', 'Consolas', monospace;
     font-size: 11px;
-    color: #b0bec5;
+    color: #d0d4da;
     line-height: 1.5;
     white-space: pre-wrap;
     word-break: break-all;
@@ -216,6 +216,6 @@ body {
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 8px; }
-::-webkit-scrollbar-track { background: #0a0f1e; }
-::-webkit-scrollbar-thumb { background: #334; border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: #445; }
+::-webkit-scrollbar-track { background: #1e2025; }
+::-webkit-scrollbar-thumb { background: #555; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #666; }

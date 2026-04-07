@@ -41,14 +41,10 @@ impl ModelCatalog {
             }
         }
 
-        // Scan GGUF directory
-        let gguf_dir = shared_root.join("gguf");
-        if gguf_dir.is_dir() {
-            Self::scan_gguf_dir(&gguf_dir, &mut entries, &mut seen);
+        // Scan the model root directory for GGUF files
+        if shared_root.is_dir() {
+            Self::scan_gguf_dir(shared_root, &mut entries, &mut seen);
         }
-
-        // Scan Ollama blobs
-        Self::scan_ollama(&mut entries, &mut seen);
 
         entries.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
         Self { entries }

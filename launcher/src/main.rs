@@ -5,7 +5,7 @@ mod models;
 mod process;
 mod resources;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -15,6 +15,12 @@ use config::LauncherConfig;
 use models::{ModelCatalog, ModelEntry, format_size};
 use process::{ProcessManager, ServerStatus, SharedProcessManager};
 use resources::SystemResources;
+
+fn pick_model_folder() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("Select folder containing GGUF models")
+        .pick_folder()
+}
 
 fn detect_repo_root() -> PathBuf {
     // Walk up from the executable to find the project root
@@ -73,7 +79,7 @@ fn App() -> Element {
         detect_llama_root(&root)
     });
     let mut config = use_signal(|| LauncherConfig::load());
-    let shared_root = use_signal(|| {
+    let mut shared_root = use_signal(|| {
         let root = detect_repo_root();
         detect_model_root(&root)
     });
@@ -151,6 +157,7 @@ fn App() -> Element {
                     }
                 } else {
                     let cfg = config.read().clone();
+                    let _ = cfg.save();
                     match mgr.start(&cfg).await {
                         Ok(()) => status_text.set("Starting...".into()),
                         Err(e) => message.set(Some((e, true))),
@@ -176,6 +183,17 @@ fn App() -> Element {
         message.set(Some(("Models refreshed.".into(), false)));
     };
 
+    let on_browse_folder = move |_| {
+        if let Some(folder) = pick_model_folder() {
+            shared_root.set(folder.clone());
+            let cfg = config.read().clone();
+            let entries = ModelCatalog::scan(&folder, &cfg.recent_models).entries;
+            let count = entries.len();
+            model_list.set(entries);
+            message.set(Some((format!("Loaded {} models from {}", count, folder.display()), false)));
+        }
+    };
+
     let on_open_chat = move |_| {
         let cfg = config.read();
         let _ = open::that(format!("http://{}:{}/", cfg.host, cfg.port));
@@ -186,8 +204,9 @@ fn App() -> Element {
         let mut cfg = config.write();
         let model_path = cfg.model_path.clone();
         res.auto_tune(&mut cfg, &model_path);
+        let _ = cfg.save();
         drop(cfg);
-        message.set(Some((format!("Auto-tuned!\n{}", res.summary()), false)));
+        message.set(Some((format!("Auto-tuned & saved!\n{}", res.summary()), false)));
     };
 
     let on_build = move |_| {
@@ -227,6 +246,7 @@ fn App() -> Element {
                 button { class: "btn", onclick: on_build, "🔧 Build" }
                 button { class: "btn", onclick: on_save, "💾 Save" }
                 button { class: "btn", onclick: on_refresh_models, "🔄 Models" }
+                button { class: "btn", onclick: on_browse_folder, "📂 Browse" }
                 button { class: "btn btn-tune", onclick: on_auto_tune, "⚡ Auto-Tune" }
                 div { class: "status-badge", style: "color: {status_color};",
                     "● {status_text}"
@@ -295,7 +315,11 @@ fn LaunchTab(config: Signal<LauncherConfig>, model_list: Signal<Vec<ModelEntry>>
                             let val = e.value();
                             let mut c = config.write();
                             c.model_path = val.clone();
-                            c.model_selection = val;
+                            c.model_selection = val.clone();
+                            // Auto-tune for the selected model
+                            let res = SystemResources::detect();
+                            res.auto_tune(&mut c, &val);
+                            let _ = c.save();
                         },
                         option { value: "", "-- Select a model --" }
                         for entry in model_list.read().iter() {

@@ -12,7 +12,7 @@
 |-----------|-------------|
 | **Bonsai-8B** | End-to-end 1-bit (Q1_0) language model based on Qwen3-8B architecture |
 | **TurboQuant llama.cpp** | Fork with custom Q1_0 CUDA kernels for GPU-accelerated 1-bit inference |
-| **Desktop Launcher** | Rust/Dioxus native app — one-click model management, no PowerShell, no Electron |
+| **Desktop Launcher** | Rust/Dioxus 0.7 native app — one-click model management, folder browser, no PowerShell, no Electron |
 | **Auto-Tune** | Detects your GPU/RAM/CPU and optimizes context, threads, and KV cache automatically |
 
 ---
@@ -38,13 +38,28 @@ Select the model, click **Start**, then **Chat**.
 
 ---
 
+## Built on the Bleeding Edge
+
+This project targets the latest toolchain at every layer. We don't pin old versions — we ride the tip.
+
+| Layer | Version | Why |
+|-------|---------|-----|
+| **Rust** | nightly (edition 2024) | Latest language features, fastest codegen |
+| **Dioxus** | 0.7 | Native desktop UI without Electron overhead |
+| **CUDA** | 13.2 | Blackwell-native kernels, latest FA support |
+| **MSVC** | v14.50 (VS 2026) | Latest C++23 compiler for llama.cpp |
+| **Flash Attention** | ON (all quants) | Maximum inference throughput |
+| **CUDA arch** | sm_120a | Blackwell native (RTX 50-series) |
+
+---
+
 ## Prerequisites
 
 - Windows 10/11 (64-bit)
 - NVIDIA GPU with CUDA support (any modern GeForce/RTX)
-- [CUDA Toolkit 12.0+](https://developer.nvidia.com/cuda-downloads)
-- [Visual Studio 2022](https://visualstudio.microsoft.com/) with **Desktop development with C++** workload
-- [Rust](https://rustup.rs) (via rustup)
+- [CUDA Toolkit 13.2](https://developer.nvidia.com/cuda-downloads) ([direct download](https://developer.download.nvidia.com/compute/cuda/13.2.0/local_installers/cuda_13.2.0_windows.exe)) — CUDA 12.0+ works but 13.x recommended
+- [Visual Studio 2026](https://visualstudio.microsoft.com/) or 2022 with **Desktop development with C++** workload
+- [Rust nightly](https://rustup.rs) (`rustup install nightly && rustup default nightly`)
 - CMake and Ninja (included with Visual Studio)
 - Git
 
@@ -150,10 +165,10 @@ echo $env:CUDA_PATH
 ```
 
 > [!WARNING]
-> **CUDA Toolkit must be installed separately from GPU drivers.** Having an NVIDIA GPU and drivers is not enough. Check that `$env:CUDA_PATH` points to a real directory (e.g., `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x`). If empty, download and install CUDA Toolkit 12.0+ from https://developer.nvidia.com/cuda-downloads before continuing.
+> **CUDA Toolkit must be installed separately from GPU drivers.** Having an NVIDIA GPU and drivers is not enough. Check that `$env:CUDA_PATH` points to a real directory (e.g., `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2`). If empty, download and install CUDA Toolkit 13.2 from https://developer.nvidia.com/cuda-downloads before continuing.
 
 > [!WARNING]
-> **Visual Studio 2022 must have the C++ workload.** Open Visual Studio Installer and confirm "Desktop development with C++" is checked. CMake and Ninja are bundled inside this workload.
+> **Visual Studio 2026 (or 2022) must have the C++ workload.** Open Visual Studio Installer and confirm "Desktop development with C++" is checked. CMake and Ninja are bundled inside this workload. Rust nightly is required — run `rustup install nightly && rustup default nightly`.
 
 ---
 
@@ -204,7 +219,7 @@ launcher\target\release\turboquant-launcher.exe
 ```
 
 In the launcher UI:
-1. The model should be auto-detected in the `models/` folder
+1. The model should be auto-detected in the `models/` folder. Use **Browse** to point to any folder with GGUF files
 2. Auto-tune will populate context size, threads, and KV cache settings based on your GPU
 3. Click **Start** — the status bar turns green when the server is running
 4. Click **Chat** to open the built-in web UI at `http://localhost:8080`
@@ -247,7 +262,7 @@ This project stands on the shoulders of several excellent open-source projects:
 - **[PrismML](https://prismml.com)** — creators of Bonsai-8B, the Q1_0 quantization format, and the 1-bit inference research that makes this possible. The CUDA kernels in this project are derived from their work.
 - **[llama.cpp](https://github.com/ggml-org/llama.cpp)** (ggml-org) — the foundational C/C++ inference engine that the entire ecosystem builds on.
 - **[TurboQuant llama.cpp](https://github.com/spiritbuun/llama-cpp-turboquant-cuda)** (spiritbuun) — the llama.cpp fork providing TurboQuant KV cache compression (turbo2/turbo3/turbo4) that this project extends with Q1_0 CUDA support.
-- **[Dioxus](https://dioxuslabs.com)** — Rust native desktop UI framework used for the launcher.
+- **[Dioxus 0.7](https://dioxuslabs.com)** — Rust 2024 edition native desktop UI framework used for the launcher.
 - **[Qwen3](https://huggingface.co/Qwen)** (Alibaba) — the base architecture that Bonsai-8B was trained on.
 
 This project merges PrismML's Q1_0 CUDA kernels into the TurboQuant fork, wraps it in a lightweight Rust launcher with auto-tuning, and packages everything for one-command deployment on Windows.
