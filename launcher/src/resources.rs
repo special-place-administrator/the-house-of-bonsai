@@ -18,16 +18,33 @@ pub enum GpuVendor {
 }
 
 impl GpuVendor {
-    /// Return the compute backends available for this GPU vendor.
-    pub fn available_backends(&self) -> Vec<&'static str> {
-        match self {
-            GpuVendor::Nvidia => vec!["auto", "cuda", "vulkan", "cpu"],
-            GpuVendor::Amd    => vec!["auto", "vulkan", "cpu"],
-            GpuVendor::Intel  => vec!["auto", "vulkan", "cpu"],
-            GpuVendor::Unknown => vec!["auto", "vulkan", "cpu"],
-            GpuVendor::None   => vec!["cpu"],
+        /// Return the compute backends available for this GPU vendor.
+        /// Also checks if the required runtime DLLs are actually present on the system.
+        pub fn available_backends(&self) -> Vec<&'static str> {
+            let mut backends = vec!["cpu"]; // CPU always available
+
+            // Check Vulkan runtime (vulkan-1.dll in System32 — comes with GPU drivers)
+            let has_vulkan_runtime = std::path::Path::new(r"C:\Windows\System32\vulkan-1.dll").exists();
+
+            // Check CUDA runtime (nvcuda.dll in System32 — comes with NVIDIA drivers)
+            let has_cuda_runtime = std::path::Path::new(r"C:\Windows\System32\nvcuda.dll").exists();
+
+            match self {
+                GpuVendor::Nvidia => {
+                    if has_vulkan_runtime { backends.push("vulkan"); }
+                    if has_cuda_runtime { backends.push("cuda"); }
+                }
+                GpuVendor::Amd | GpuVendor::Intel | GpuVendor::Unknown => {
+                    if has_vulkan_runtime { backends.push("vulkan"); }
+                }
+                GpuVendor::None => {}
+            }
+
+            if backends.len() > 1 {
+                backends.insert(0, "auto");
+            }
+            backends
         }
-    }
 
     /// Human-readable label for a backend value.
     pub fn backend_label(backend: &str) -> &'static str {

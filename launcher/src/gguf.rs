@@ -151,6 +151,10 @@ pub struct ModelMetadata {
     pub file_type: Option<u32>,
     pub capabilities: ModelCapabilities,
     pub chat_template_raw: Option<String>,
+    /// True if the model uses quantization types that require CUDA (e.g. Q1_0)
+    pub requires_cuda: bool,
+    /// True if the model uses standard quantization that works on any backend
+    pub cpu_compatible: bool,
 }
 
 impl ModelMetadata {
@@ -239,6 +243,13 @@ impl ModelMetadata {
             speech,
         };
 
+        // Q1_0 quantization (PrismML file_type 41/42) requires our custom CUDA kernels.
+        // Standard quant types (Q4_0=2, Q4_1=3, Q5_0=8, Q5_1=9, Q8_0=7, F16=1, F32=0)
+        // work on any backend (CUDA, Vulkan, CPU).
+        let ft = kv.get("general.file_type").and_then(|v| v.as_u32());
+        let requires_cuda = matches!(ft, Some(41) | Some(42));
+        let cpu_compatible = !requires_cuda;
+
         Self {
             name,
             size_label: kv.get("general.size_label").and_then(|v| v.as_str()).map(String::from),
@@ -252,9 +263,11 @@ impl ModelMetadata {
             recommended_top_p: kv.get("general.sampling.top_p").and_then(|v| v.as_f32()),
             recommended_temp: kv.get("general.sampling.temp").and_then(|v| v.as_f32()),
             recommended_min_p: kv.get("general.sampling.min_p").and_then(|v| v.as_f32()),
-            file_type: kv.get("general.file_type").and_then(|v| v.as_u32()),
+            file_type: ft,
             capabilities,
             chat_template_raw,
+            requires_cuda,
+            cpu_compatible,
         }
     }
 
@@ -275,6 +288,46 @@ impl ModelMetadata {
         let hdim = self.head_dim()? as u64;
         Some(kv_heads * hdim * 2)
     }
+
+
+        /// Check if this model is compatible with the given backend.
+        /// Returns Ok(()) if compatible, Err(reason) if not.
+        pub fn check_backend_compat(&self, backend: &str, available_backends: &[&str]) -> Result<(), String> {
+            let model_name = self.name.as_deref().unwrap_or("This model");
+
+            // Check if the chosen backend is even available on this system
+            if backend != "auto" && !available_backends.contains(&backend) {
+                return Err(format!(
+                    "{} backend is not available on this system. Available: {}",
+                    backend, available_backends.join(", ")
+                ));
+            }
+
+            // Q1_0 models require CUDA — custom kernels don't exist for Vulkan/CPU
+            if self.requires_cuda {
+                match backend {
+                    "cpu" => return Err(format!(
+                        "{} uses Q1_0 quantization which requires CUDA (NVIDIA GPU). CPU is not supported for this model.",
+                        model_name
+                    )),
+                    "vulkan" => return Err(format!(
+                        "{} uses Q1_0 quantization which requires CUDA (NVIDIA GPU). Vulkan is not supported for this model.",
+                        model_name
+                    )),
+                    "auto" => {
+                        if !available_backends.contains(&"cuda") {
+                            return Err(format!(
+                                "{} uses Q1_0 quantization which requires an NVIDIA GPU with CUDA. No CUDA runtime detected on this system.",
+                                model_name
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            Ok(())
+        }
 }
 
 // ---------------------------------------------------------------------------

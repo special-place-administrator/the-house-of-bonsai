@@ -185,6 +185,17 @@ impl ProcessManager {
             }
         }
 
+        // Check model+backend compatibility before starting
+        if !slot_config.model_path.is_empty() {
+            if let Some(meta) = crate::gguf::ModelMetadata::from_file(&slot_config.model_path) {
+                let res = crate::resources::SystemResources::detect();
+                let backends = res.available_backends();
+                if let Err(reason) = meta.check_backend_compat(&slot_config.backend, &backends) {
+                    return Err(format!("Slot {}: {}", index, reason));
+                }
+            }
+        }
+
         // Reset slot state
         let ps = &mut self.slots[index];
         ps.status = ServerStatus::Starting;
