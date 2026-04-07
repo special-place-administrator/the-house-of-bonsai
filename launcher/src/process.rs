@@ -81,16 +81,30 @@ const MAX_LOG_LINES: usize = 5000;
 
 impl ProcessManager {
     pub fn new(repo_root: &Path) -> Self {
-        let server_exe = repo_root.join("build").join("bin").join("llama-server.exe");
-        let (log_tx, _) = broadcast::channel(256);
-        Self {
-            server_exe,
-            slots: Vec::new(),
-            log_tx,
-            stdout_lines: Vec::new(),
-            stderr_lines: Vec::new(),
+            // Look for llama-server.exe in multiple locations:
+            // 1. Next to the launcher exe (release/portable layout)
+            // 2. In the build output directory (development layout)
+            let server_exe = if let Ok(exe_path) = std::env::current_exe() {
+                let exe_dir = exe_path.parent().unwrap_or(Path::new("."));
+                let portable = exe_dir.join("llama-server.exe");
+                if portable.exists() {
+                    portable
+                } else {
+                    repo_root.join("build").join("bin").join("llama-server.exe")
+                }
+            } else {
+                repo_root.join("build").join("bin").join("llama-server.exe")
+            };
+
+            let (log_tx, _) = broadcast::channel(256);
+            Self {
+                server_exe,
+                slots: Vec::new(),
+                log_tx,
+                stdout_lines: Vec::new(),
+                stderr_lines: Vec::new(),
+            }
         }
-    }
 
     /// Ensure we have at least `n` ProcessSlot entries, adding empty ones as
     /// needed.  Called before start to keep slots in sync with config.

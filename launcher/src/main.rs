@@ -41,8 +41,16 @@ fn detect_repo_root() -> PathBuf {
 }
 
 fn detect_model_root(repo_root: &Path) -> PathBuf {
+    // 1. Next to the launcher exe (release/portable layout)
+    if let Ok(exe_path) = std::env::current_exe() {
+        let exe_dir = exe_path.parent().unwrap_or(std::path::Path::new("."));
+        let portable_models = exe_dir.join("models");
+        if portable_models.is_dir() { return portable_models; }
+    }
+    // 2. Project-local models/
     let local = repo_root.join("models");
     if local.is_dir() { return local; }
+    // 3. Shared model root
     let shared = PathBuf::from(r"C:\AI_STUFF\LLM_MODEL");
     if shared.is_dir() { return shared; }
     local
