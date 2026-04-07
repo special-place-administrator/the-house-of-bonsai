@@ -102,6 +102,35 @@ pub struct GgufMetadata {
 }
 
 // ---------------------------------------------------------------------------
+// Model capabilities / modality detection
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default)]
+pub struct ModelCapabilities {
+    pub text_generation: bool,
+    pub embedding: bool,
+    pub vision: bool,
+    pub code: bool,
+    pub tool_use: bool,
+    pub thinking: bool,
+    pub speech: bool,
+}
+
+impl ModelCapabilities {
+    pub fn icons(&self) -> Vec<(&'static str, &'static str)> {
+        let mut icons = Vec::new();
+        if self.text_generation { icons.push(("\u{1F4AC}", "Text")); }
+        if self.embedding { icons.push(("\u{1F524}", "Embed")); }
+        if self.vision { icons.push(("\u{1F441}", "Vision")); }
+        if self.code { icons.push(("\u{1F4BB}", "Code")); }
+        if self.tool_use { icons.push(("\u{1F527}", "Tools")); }
+        if self.thinking { icons.push(("\u{1F9E0}", "Think")); }
+        if self.speech { icons.push(("\u{1F399}", "Speech")); }
+        icons
+    }
+}
+
+// ---------------------------------------------------------------------------
 // High-level model metadata extracted from the raw KV pairs
 // ---------------------------------------------------------------------------
 
@@ -120,6 +149,8 @@ pub struct ModelMetadata {
     pub recommended_temp: Option<f32>,
     pub recommended_min_p: Option<f32>,
     pub file_type: Option<u32>,
+    pub capabilities: ModelCapabilities,
+    pub chat_template_raw: Option<String>,
 }
 
 impl ModelMetadata {
@@ -147,8 +178,69 @@ impl ModelMetadata {
             kv.get(&key).and_then(|v| v.as_u32())
         };
 
+        let name = kv.get("general.name").and_then(|v| v.as_str()).map(String::from);
+        let name_lower = name.as_deref().map(|n| n.to_lowercase()).unwrap_or_default();
+
+        // Extract chat template string for capability detection
+        let chat_template_raw = kv
+            .get("tokenizer.chat_template")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let has_chat_template = chat_template_raw.is_some();
+        let tmpl_lower = chat_template_raw.as_deref().map(|s| s.to_lowercase()).unwrap_or_default();
+
+        // --- Capability detection ---
+
+        let is_embedding_arch = matches!(
+            arch_prefix.as_str(),
+            "nomic-bert" | "nomic-bert-moe" | "bert" | "jina-bert-v2" | "xlm-roberta" | "e5"
+        );
+        let general_type_embed = kv
+            .get("general.type")
+            .and_then(|v| v.as_str())
+            .map(|t| t == "embedding")
+            .unwrap_or(false);
+        let name_suggests_embed = name_lower.contains("embed");
+        let embedding = is_embedding_arch || general_type_embed || (name_suggests_embed && !has_chat_template);
+
+        let text_generation = has_chat_template && !embedding;
+
+        let vision = matches!(
+            arch_prefix.as_str(),
+            "llava" | "minicpm-v" | "internvl" | "mllama" | "gemma3"
+        ) || name_lower.contains("vision")
+          || name_lower.contains("llava")
+          || name_lower.contains("pixtral");
+
+        let code = name_lower.contains("code")
+            || name_lower.contains("coder")
+            || name_lower.contains("starcoder")
+            || name_lower.contains("codestral")
+            || name_lower.contains("deepseek-coder")
+            || name_lower.contains("qwen2.5-coder");
+
+        let tool_use = tmpl_lower.contains("tools")
+            || tmpl_lower.contains("tool_call")
+            || tmpl_lower.contains("function");
+
+        let thinking = tmpl_lower.contains("<think>")
+            || tmpl_lower.contains("thinking")
+            || tmpl_lower.contains("<reasoning>");
+
+        let speech = arch_prefix == "whisper" || name_lower.contains("whisper");
+
+        let capabilities = ModelCapabilities {
+            text_generation,
+            embedding,
+            vision,
+            code,
+            tool_use,
+            thinking,
+            speech,
+        };
+
         Self {
-            name: kv.get("general.name").and_then(|v| v.as_str()).map(String::from),
+            name,
             size_label: kv.get("general.size_label").and_then(|v| v.as_str()).map(String::from),
             architecture: arch,
             context_length: arch_u32("context_length"),
@@ -161,6 +253,8 @@ impl ModelMetadata {
             recommended_temp: kv.get("general.sampling.temp").and_then(|v| v.as_f32()),
             recommended_min_p: kv.get("general.sampling.min_p").and_then(|v| v.as_f32()),
             file_type: kv.get("general.file_type").and_then(|v| v.as_u32()),
+            capabilities,
+            chat_template_raw,
         }
     }
 

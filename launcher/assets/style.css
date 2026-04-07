@@ -260,6 +260,21 @@ body {
     font-weight: 600;
 }
 
+.capability-icons {
+    display: flex;
+    gap: 4px;
+    margin-left: 8px;
+}
+
+.cap-badge {
+    font-size: 14px;
+    padding: 1px 4px;
+    border-radius: 4px;
+    background: rgba(124, 184, 240, 0.12);
+    cursor: default;
+    line-height: 1.2;
+}
+
 .model-card-header-right {
     display: flex;
     align-items: center;

@@ -376,11 +376,27 @@ fn ModelCard(
     // Auto-save helper
     let save = move || { let _ = config.read().save(); };
 
+    // Read GGUF metadata for capability icons
+    let caps_icons: Vec<(&str, &str)> = if !slot.model_path.is_empty() {
+        gguf::ModelMetadata::from_file(&slot.model_path)
+            .map(|m| m.capabilities.icons())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     rsx! {
         div { class: "model-card",
             // Card header
             div { class: "model-card-header",
                 span { class: "model-card-title", "Model Slot {index + 1}" }
+                if !caps_icons.is_empty() {
+                    span { class: "capability-icons",
+                        for (icon, label) in caps_icons.iter() {
+                            span { class: "cap-badge", title: "{label}", "{icon}" }
+                        }
+                    }
+                }
                 div { class: "model-card-header-right",
                     span { class: "status-dot", style: "color: {status_dot_color};", title: "{status_label}",
                         "●"
@@ -411,8 +427,28 @@ fn ModelCard(
                             let mut c = config.write();
                             if let Some(s) = c.slots.get_mut(index) {
                                 s.model_path = val.clone();
-                                // Auto-tune this slot
+                                // Read GGUF metadata for auto-tune and capability-based config
                                 let meta = gguf::ModelMetadata::from_file(&val);
+
+                                // Auto-configure based on detected capabilities
+                                if let Some(ref m) = meta {
+                                    // Set alias from model name if available
+                                    if let Some(ref model_name) = m.name {
+                                        s.alias = model_name.clone();
+                                    }
+                                    if m.capabilities.embedding {
+                                        s.embedding_mode = true;
+                                        s.cache_type_k = "f16".into();
+                                        s.cache_type_v = "f16".into();
+                                        s.flash_attention = "off".into();
+                                        s.turbo_layer_adaptive = "off".into();
+                                        s.parallel = "4".into();
+                                    } else {
+                                        s.embedding_mode = false;
+                                    }
+                                }
+
+                                // Auto-tune this slot
                                 let res = SystemResources::detect();
                                 let (threads, http_threads) = res.auto_tune(s, &val, meta.as_ref());
                                 c.threads = threads.to_string();
