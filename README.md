@@ -44,14 +44,16 @@ Select a model, click **Start**, then **Chat**. Add more models with **+ Add Mod
 
 ### Getting Models
 
-Search and download models directly from the launcher — each model card has a built-in **HuggingFace search** with sort options (Newest, Popular, A-Z). No manual downloads needed.
+Every model card has a built-in **HuggingFace search** — type a name, pick a GGUF file, and download it directly inside the app with a progress bar. Sort by Newest, Popular, or A-Z. No manual downloads needed.
 
-**Recommended starter models for MCP tools (Prism, Goose, etc.):**
+To get started, search for these two essential models:
 
-| Model | Size | Purpose |
-|-------|------|---------|
-| **Bonsai-8B** (Q1_0) | 1.15 GB | Text/chat — search "bonsai" in the launcher |
-| **nomic-embed-text-v2-moe** | 1.8 GB | Embeddings (768-dim) — search "nomic embed" |
+| Search for | What you get | Use case |
+|------------|-------------|----------|
+| `bonsai 8b` | PrismML Bonsai-8B (1.15 GB, Q1_0) | Fast local text/chat with tool use and thinking |
+| `nomic embed` | nomic-embed-text-v2-moe (1.8 GB) | Embeddings for MCP tools like Prism, RAG pipelines, semantic search |
+
+These two models together give you a complete local AI stack — text generation and embeddings — for tools like [Prism MCP](https://github.com/dcostenco/prism-mcp), Goose, Open WebUI, or any OpenAI-compatible client.
 
 You can also place `.gguf` files manually in the `models/` folder, or use **Browse** to point to any directory.
 
