@@ -15,7 +15,7 @@ use dioxus::prelude::*;
 use config::LauncherConfig;
 use models::{ModelCatalog, ModelEntry, format_size};
 use process::{ProcessManager, ServerStatus, SharedProcessManager};
-use resources::SystemResources;
+use resources::{GpuVendor, SystemResources};
 
 fn pick_model_folder() -> Option<PathBuf> {
     rfd::FileDialog::new()
@@ -468,6 +468,39 @@ fn ModelCard(
                                 value: "{entry.path.display()}",
                                 selected: entry.path.to_string_lossy() == slot.model_path,
                                 "{entry.display_name} ({format_size(entry.size_bytes)})"
+                            }
+                        }
+                    }
+                }
+                // Backend selector — only show backends available for detected GPU
+                div { class: "field",
+                    label { "Backend" }
+                    select {
+                        value: "{slot.backend}",
+                        onchange: move |e: Event<FormData>| {
+                            let val = e.value();
+                            if let Some(s) = config.write().slots.get_mut(index) {
+                                s.backend = val.clone();
+                                // When switching to CPU, force gpu_layers to 0;
+                                // when switching back to a GPU backend, restore to auto
+                                if val == "cpu" {
+                                    s.gpu_layers = "0".into();
+                                } else if s.gpu_layers == "0" {
+                                    s.gpu_layers = "auto".into();
+                                }
+                            }
+                            save();
+                        },
+                        {
+                            let backends = cached_resources.read().available_backends();
+                            rsx! {
+                                for backend in backends.iter() {
+                                    option {
+                                        value: "{backend}",
+                                        selected: *backend == slot.backend,
+                                        "{GpuVendor::backend_label(backend)}"
+                                    }
+                                }
                             }
                         }
                     }

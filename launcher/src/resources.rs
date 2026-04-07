@@ -4,11 +4,57 @@ use crate::gguf::ModelMetadata;
 
 const RESERVE_FRACTION: f64 = 0.10; // Reserve 10% of each resource
 
+// ---------------------------------------------------------------------------
+// GPU vendor / backend detection
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum GpuVendor {
+    Nvidia,
+    Amd,
+    Intel,
+    Unknown,
+    None, // CPU only / no GPU
+}
+
+impl GpuVendor {
+    /// Return the compute backends available for this GPU vendor.
+    pub fn available_backends(&self) -> Vec<&'static str> {
+        match self {
+            GpuVendor::Nvidia => vec!["auto", "cuda", "vulkan", "cpu"],
+            GpuVendor::Amd    => vec!["auto", "vulkan", "cpu"],
+            GpuVendor::Intel  => vec!["auto", "vulkan", "cpu"],
+            GpuVendor::Unknown => vec!["auto", "vulkan", "cpu"],
+            GpuVendor::None   => vec!["cpu"],
+        }
+    }
+
+    /// Human-readable label for a backend value.
+    pub fn backend_label(backend: &str) -> &'static str {
+        match backend {
+            "auto"   => "Auto (detect)",
+            "cuda"   => "CUDA (NVIDIA)",
+            "vulkan" => "Vulkan (AMD/Intel/NVIDIA)",
+            "cpu"    => "CPU Only",
+            _        => "Unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GpuInfo {
+    pub vendor: GpuVendor,
+    pub name: String,
+    pub vram_total_mb: u64,
+    pub vram_free_mb: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct SystemResources {
     pub gpu_vram_total_mb: u64,
     pub gpu_vram_free_mb: u64,
     pub gpu_name: String,
+    pub gpu_vendor: GpuVendor,
     pub ram_total_mb: u64,
     pub ram_free_mb: u64,
     pub cpu_cores: u32,
@@ -22,14 +68,20 @@ impl SystemResources {
         let (cores, threads) = detect_cpu();
 
         Self {
-            gpu_vram_total_mb: gpu.0,
-            gpu_vram_free_mb: gpu.1,
-            gpu_name: gpu.2,
+            gpu_vram_total_mb: gpu.vram_total_mb,
+            gpu_vram_free_mb: gpu.vram_free_mb,
+            gpu_name: gpu.name,
+            gpu_vendor: gpu.vendor,
             ram_total_mb: ram_total,
             ram_free_mb: ram_free,
             cpu_cores: cores,
             cpu_threads: threads,
         }
+    }
+
+    /// Available compute backends based on detected GPU hardware.
+    pub fn available_backends(&self) -> Vec<&'static str> {
+        self.gpu_vendor.available_backends()
     }
 
     /// Available VRAM after 10% reserve
@@ -144,14 +196,25 @@ impl SystemResources {
 
     /// Generate a human-readable summary
     pub fn summary(&self) -> String {
+        let vendor_str = match &self.gpu_vendor {
+            GpuVendor::Nvidia  => "NVIDIA",
+            GpuVendor::Amd     => "AMD",
+            GpuVendor::Intel   => "Intel",
+            GpuVendor::Unknown => "Unknown",
+            GpuVendor::None    => "None",
+        };
+        let backends = self.available_backends().join(", ");
         format!(
             "GPU: {} ({} MB total, {} MB free, {} MB usable)\n\
+             Vendor: {} | Backends: [{}]\n\
              RAM: {} MB total, {} MB free, {} MB usable\n\
              CPU: {} cores / {} threads ({} usable)",
             self.gpu_name,
             self.gpu_vram_total_mb,
             self.gpu_vram_free_mb,
             self.usable_vram_mb(),
+            vendor_str,
+            backends,
             self.ram_total_mb,
             self.ram_free_mb,
             self.usable_ram_mb(),
@@ -162,13 +225,14 @@ impl SystemResources {
     }
 }
 
-fn detect_gpu() -> (u64, u64, String) {
-    let output = std::process::Command::new("nvidia-smi")
+fn detect_gpu() -> GpuInfo {
+    // Try NVIDIA first via nvidia-smi
+    let nvidia = std::process::Command::new("nvidia-smi")
         .args(["--query-gpu=memory.total,memory.free,name", "--format=csv,noheader,nounits"])
         .output();
 
-    match output {
-        Ok(out) if out.status.success() => {
+    if let Ok(out) = nvidia {
+        if out.status.success() {
             let text = String::from_utf8_lossy(&out.stdout);
             let line = text.lines().next().unwrap_or("");
             let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
@@ -176,12 +240,64 @@ fn detect_gpu() -> (u64, u64, String) {
                 let total = parts[0].parse().unwrap_or(0);
                 let free = parts[1].parse().unwrap_or(0);
                 let name = parts[2].to_string();
-                return (total, free, name);
+                return GpuInfo {
+                    vendor: GpuVendor::Nvidia,
+                    name,
+                    vram_total_mb: total,
+                    vram_free_mb: free,
+                };
             }
-            (0, 0, "Unknown GPU".into())
         }
-        _ => (0, 0, "No NVIDIA GPU detected".into()),
     }
+
+    // Fallback: detect GPU vendor via WMI (AMD / Intel / Unknown)
+    let vendor = detect_gpu_vendor_wmi();
+    let name = match &vendor {
+        GpuVendor::Amd => "AMD GPU (VRAM unknown)".into(),
+        GpuVendor::Intel => "Intel GPU (VRAM unknown)".into(),
+        GpuVendor::Unknown => "Unknown GPU".into(),
+        GpuVendor::None => "No GPU detected".into(),
+        GpuVendor::Nvidia => unreachable!(), // handled above
+    };
+
+    GpuInfo {
+        vendor,
+        name,
+        vram_total_mb: 0,
+        vram_free_mb: 0,
+    }
+}
+
+/// Detect GPU vendor from WMI VideoController names.
+fn detect_gpu_vendor_wmi() -> GpuVendor {
+    let output = std::process::Command::new("wmic")
+        .args(["path", "win32_VideoController", "get", "Name"])
+        .output();
+
+    let text = match output {
+        Ok(out) if out.status.success() => {
+            String::from_utf8_lossy(&out.stdout).to_string()
+        }
+        _ => return GpuVendor::None,
+    };
+
+    let upper = text.to_uppercase();
+
+    // Check for discrete GPU vendors (skip integrated if discrete found)
+    if upper.contains("RADEON") || upper.contains("AMD") {
+        return GpuVendor::Amd;
+    }
+    if upper.contains("ARC") || upper.contains("BATTLEMAGE") {
+        return GpuVendor::Intel;
+    }
+    // Intel integrated (UHD/Iris) is not useful for LLM offload — treat as None
+    // unless it's the only GPU
+    if upper.contains("INTEL") {
+        // Could be Intel integrated only — still report as Intel so Vulkan is offered
+        return GpuVendor::Intel;
+    }
+
+    GpuVendor::None
 }
 
 fn detect_ram() -> (u64, u64) {

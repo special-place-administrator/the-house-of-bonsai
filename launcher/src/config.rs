@@ -34,6 +34,8 @@ pub struct ModelSlot {
     pub batch_size: String,
     #[serde(default = "default_ubatch_size")]
     pub ubatch_size: String,
+    #[serde(default = "default_backend")]
+    pub backend: String, // "auto", "cuda", "vulkan", "cpu"
 }
 
 impl ModelSlot {
@@ -53,6 +55,7 @@ impl ModelSlot {
             parallel: default_parallel(),
             batch_size: default_batch_size(),
             ubatch_size: default_ubatch_size(),
+            backend: default_backend(),
         }
     }
 
@@ -76,9 +79,17 @@ impl ModelSlot {
             args.push("--embedding".into());
         }
 
+        // Backend "cpu" forces gpu_layers to 0 regardless of config
+        let effective_gpu_layers: String;
+        if self.backend == "cpu" {
+            effective_gpu_layers = "0".into();
+        } else {
+            effective_gpu_layers = self.gpu_layers.clone();
+        }
+
         let pairs: &[(&str, &str)] = &[
             ("-c",  &self.context_size),
-            ("-ngl", &self.gpu_layers),
+            ("-ngl", &effective_gpu_layers),
             ("-fa", &self.flash_attention),
             ("-ctk", &self.cache_type_k),
             ("-ctv", &self.cache_type_v),
@@ -216,6 +227,7 @@ fn default_layer_adaptive() -> String { "1".into() }
 fn default_parallel() -> String { "1".into() }
 fn default_batch_size() -> String { "2048".into() }
 fn default_ubatch_size() -> String { "512".into() }
+fn default_backend() -> String { "auto".into() }
 fn default_log_verbosity() -> String { "3".into() }
 
 impl Default for LauncherConfig {
@@ -289,6 +301,7 @@ impl LauncherConfig {
                     parallel: legacy.parallel,
                     batch_size: legacy.batch_size,
                     ubatch_size: legacy.ubatch_size,
+                    backend: default_backend(),
                 };
                 cfg.slots = vec![slot];
             } else {
