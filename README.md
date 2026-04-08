@@ -159,7 +159,7 @@ the-house-of-bonsai/
 
 ### Q1_0 Quantization
 
-![ver130](./ver130.png)
+![ver130](./ver131.png)
 
 Bonsai-8B uses PrismML's Q1_0 format — each weight is a single bit (`0` = -scale, `1` = +scale) with a shared FP16 scale per 128 elements. This gives:
 
