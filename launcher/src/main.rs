@@ -43,22 +43,37 @@ fn detect_repo_root() -> PathBuf {
 }
 
 fn detect_model_root(repo_root: &Path) -> PathBuf {
-    // 1. Persisted model directory from config (user chose via Browse)
     let cfg = LauncherConfig::load();
+
+    // 1. Persisted model directory from config (user chose via Browse)
     if !cfg.model_root.is_empty() {
         let p = PathBuf::from(&cfg.model_root);
         if p.is_dir() { return p; }
     }
-    // 2. models/ next to the launcher exe (portable layout)
+
+    // 2. Derive from existing slot model paths — if a slot has a model,
+    //    its parent directory is where models live
+    for slot in &cfg.slots {
+        if !slot.model_path.is_empty() {
+            let p = PathBuf::from(&slot.model_path);
+            if let Some(parent) = p.parent() {
+                if parent.is_dir() { return parent.to_path_buf(); }
+            }
+        }
+    }
+
+    // 3. models/ next to the launcher exe (portable layout)
     if let Ok(exe_path) = std::env::current_exe() {
         let exe_dir = exe_path.parent().unwrap_or(std::path::Path::new("."));
         let portable_models = exe_dir.join("models");
         if portable_models.is_dir() { return portable_models; }
     }
-    // 3. Project-local models/
+
+    // 4. Project-local models/
     let local = repo_root.join("models");
     if local.is_dir() { return local; }
-    // 4. User home fallback — create if needed
+
+    // 5. User home fallback — create if needed
     let home_models = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("BonsaiLauncher")
@@ -92,7 +107,16 @@ fn main() {
     // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE — all child llama-server processes
     // are automatically killed when the launcher exits (any exit path).
 
+    // Kill orphaned llama-servers on Ctrl+C / terminal close
+    ctrlc::set_handler(move || {
+        process::kill_all_llama_servers();
+        std::process::exit(0);
+    }).ok();
+
     dioxus::launch(App);
+
+    // Safety net: kill any surviving llama-server processes after GUI closes
+    process::kill_all_llama_servers();
 }
 
 #[component]

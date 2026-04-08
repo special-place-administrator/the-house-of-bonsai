@@ -193,15 +193,53 @@ impl SystemResources {
             slot.ubatch_size = "128".into();
         }
 
+        // -- Flash attention --
+        // On by default — nearly all modern architectures support it.
+        // Only disable if model metadata explicitly indicates issues.
+        slot.flash_attention = "on".into();
+
+        // -- Cache type --
+        // Derive from model size vs available VRAM:
+        //   - If model leaves plenty of VRAM headroom → turbo3 (best quality/compression)
+        //   - If tight on VRAM → turbo2 (more compression)
+        //   - Embedding models with small embedding dim → turbo3 is fine
+        if remaining_vram > model_vram * 2 {
+            // Plenty of room — turbo3 gives good quality with 3-bit KV
+            slot.cache_type_k = "turbo3".into();
+            slot.cache_type_v = "turbo3".into();
+        } else if remaining_vram > model_vram {
+            // Moderate room — turbo3 still fine
+            slot.cache_type_k = "turbo3".into();
+            slot.cache_type_v = "turbo3".into();
+        } else {
+            // Tight — use turbo2 for max compression
+            slot.cache_type_k = "turbo2".into();
+            slot.cache_type_v = "turbo2".into();
+        }
+
         // -- Parallel slots --
+        // Embedding models: lower parallel (2) since each request is cheap
+        // Text models: compute from VRAM budget
+        let is_embedding = meta.map(|m| m.capabilities.embedding).unwrap_or(false);
         let kv_per_slot = (ctx / 1024) * kv_per_1k_ctx;
-        let max_slots = if kv_per_slot > 0 {
+        let max_slots = if is_embedding {
+            2
+        } else if kv_per_slot > 0 {
             let kv_budget = remaining_vram.saturating_sub(512);
             std::cmp::min(kv_budget / kv_per_slot, 8)
         } else {
             1
         };
         slot.parallel = std::cmp::max(max_slots, 1).to_string();
+
+        // -- Layer adaptive --
+        // Off for embedding models (no KV cache compression benefit)
+        // On (1) for text models with turbo cache
+        if is_embedding {
+            slot.turbo_layer_adaptive = "off".into();
+        } else {
+            slot.turbo_layer_adaptive = "1".into();
+        }
 
         // -- GPU layers --
         slot.gpu_layers = "auto".into();

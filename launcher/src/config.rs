@@ -36,6 +36,18 @@ pub struct ModelSlot {
     pub ubatch_size: String,
     #[serde(default = "default_backend")]
     pub backend: String, // "auto", "cuda", "vulkan", "cpu"
+
+    // -- sampling params --
+    #[serde(default = "default_temp")]
+    pub temp: String,
+    #[serde(default = "default_top_p")]
+    pub top_p: String,
+    #[serde(default = "default_top_k")]
+    pub top_k: String,
+    #[serde(default = "default_min_p")]
+    pub min_p: String,
+    #[serde(default = "default_reasoning_budget")]
+    pub reasoning_budget: String,
 }
 
 impl ModelSlot {
@@ -56,6 +68,11 @@ impl ModelSlot {
             batch_size: default_batch_size(),
             ubatch_size: default_ubatch_size(),
             backend: default_backend(),
+            temp: default_temp(),
+            top_p: default_top_p(),
+            top_k: default_top_k(),
+            min_p: default_min_p(),
+            reasoning_budget: default_reasoning_budget(),
         }
     }
 
@@ -99,6 +116,11 @@ impl ModelSlot {
             ("-t",  &config.threads),
             ("--threads-http", &config.threads_http),
             ("-lv", &config.log_verbosity),
+            ("--temp", &self.temp),
+            ("--top-p", &self.top_p),
+            ("--top-k", &self.top_k),
+            ("--min-p", &self.min_p),
+            ("--reasoning-budget", &self.reasoning_budget),
         ];
 
         for (flag, value) in pairs {
@@ -236,6 +258,12 @@ fn default_ubatch_size() -> String { "512".into() }
 fn default_backend() -> String { "auto".into() }
 fn default_log_verbosity() -> String { "3".into() }
 
+fn default_temp() -> String { "0.5".into() }
+fn default_top_p() -> String { "0.85".into() }
+fn default_top_k() -> String { "20".into() }
+fn default_min_p() -> String { "0".into() }
+fn default_reasoning_budget() -> String { "0".into() }
+
 fn default_api_port() -> u16 { 9876 }
 
 impl Default for LauncherConfig {
@@ -277,8 +305,25 @@ impl LauncherConfig {
         Self::config_dir().join("logs")
     }
 
+    /// Legacy config directory (pre-rename).
+    fn legacy_config_path() -> PathBuf {
+        let local_app_data = dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("."));
+        local_app_data.join("LlamaTurboQuantLauncher").join("launcher-config.json")
+    }
+
     pub fn load() -> Self {
         let path = Self::config_path();
+
+        // Migrate from legacy config dir if new one doesn't exist yet
+        if !path.exists() {
+            let legacy = Self::legacy_config_path();
+            if legacy.exists() {
+                let _ = std::fs::create_dir_all(Self::config_dir());
+                let _ = std::fs::copy(&legacy, &path);
+            }
+        }
+
         if !path.exists() {
             return Self::default();
         }
@@ -312,6 +357,11 @@ impl LauncherConfig {
                     batch_size: legacy.batch_size,
                     ubatch_size: legacy.ubatch_size,
                     backend: default_backend(),
+                    temp: default_temp(),
+                    top_p: default_top_p(),
+                    top_k: default_top_k(),
+                    min_p: default_min_p(),
+                    reasoning_budget: default_reasoning_budget(),
                 };
                 cfg.slots = vec![slot];
             } else {
@@ -326,23 +376,29 @@ impl LauncherConfig {
         cfg
     }
 
-    /// Re-read GGUF metadata for each slot and apply capability-based settings.
+    /// Re-read GGUF metadata for each slot.
+    /// - Always syncs: embedding_mode, sampling params (from GGUF author recommendations)
+    /// - Fresh slots only: alias from model name
+    /// Infrastructure params (context, cache, FA, parallel) are set by auto_tune(),
+    /// not here — auto_tune uses VRAM + model architecture to compute them.
     pub fn redetect_capabilities(&mut self) {
         for slot in &mut self.slots {
             if slot.model_path.is_empty() { continue; }
             if let Some(meta) = crate::gguf::ModelMetadata::from_file(&slot.model_path) {
-                if meta.capabilities.embedding {
-                    slot.embedding_mode = true;
-                    slot.cache_type_k = "f16".into();
-                    slot.cache_type_v = "f16".into();
-                    slot.flash_attention = "off".into();
-                    slot.turbo_layer_adaptive = "off".into();
-                    if slot.parallel == "1" { slot.parallel = "4".into(); }
-                } else {
-                    slot.embedding_mode = false;
-                }
-                if let Some(ref name) = meta.name {
-                    if slot.alias.starts_with("Model (port") {
+                // Always sync embedding_mode from GGUF metadata
+                slot.embedding_mode = meta.capabilities.embedding;
+
+                // Apply GGUF-embedded sampling params when present (author's recommendations)
+                if let Some(t) = meta.recommended_temp { slot.temp = format!("{t}"); }
+                if let Some(p) = meta.recommended_top_p { slot.top_p = format!("{p}"); }
+                if let Some(k) = meta.recommended_top_k { slot.top_k = format!("{k}"); }
+                if let Some(m) = meta.recommended_min_p { slot.min_p = format!("{m}"); }
+
+                // Auto-name fresh slots from GGUF model name
+                let is_fresh = slot.alias.starts_with("Model (port")
+                    || slot.alias == "Bonsai Local";
+                if is_fresh {
+                    if let Some(ref name) = meta.name {
                         slot.alias = name.clone();
                     }
                 }

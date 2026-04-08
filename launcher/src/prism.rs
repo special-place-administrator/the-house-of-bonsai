@@ -146,17 +146,29 @@ pub fn find_node_exe() -> Option<PathBuf> {
 }
 
 pub fn find_npm_exe() -> Option<PathBuf> {
+    // 1. Try PATH (works when launched from terminal)
     if let Ok(output) = Command::new("npm").arg("--version").output() {
         if output.status.success() {
             return Some(PathBuf::from("npm"));
         }
     }
-    // Windows: npm.cmd alongside node.exe
+    // 2. Next to node.exe (covers nvm shims, direct installs)
     if let Some(node) = find_node_exe() {
         if let Some(dir) = node.parent() {
             let npm_cmd = dir.join("npm.cmd");
             if npm_cmd.exists() {
                 return Some(npm_cmd);
+            }
+        }
+    }
+    // 3. Use `where` command — finds executables across the full system PATH
+    //    (more reliable than inherited process PATH for GUI apps)
+    if let Ok(output) = Command::new("cmd").args(["/c", "where npm.cmd"]).output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().lines().next()
+                .map(|s| PathBuf::from(s.trim()));
+            if let Some(p) = path {
+                if p.exists() { return Some(p); }
             }
         }
     }
@@ -172,7 +184,18 @@ pub async fn check_prism_readiness(
     let (text_port, embed_port) = discover_endpoints(config);
     let host = &config.host;
 
-    let dist_path = repo_root.join("prism-mcp").join("dist").join("server.js");
+    // Search for prism-mcp in multiple locations
+    let prism_dir = {
+        let mut found = repo_root.join("prism-mcp");
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                let next_to_exe = exe_dir.join("prism-mcp");
+                if next_to_exe.join("package.json").exists() { found = next_to_exe; }
+            }
+        }
+        found
+    };
+    let dist_path = prism_dir.join("dist").join("server.js");
     let node_path = find_node_exe().unwrap_or_default();
     let npm_available = find_npm_exe().is_some();
 
@@ -233,10 +256,26 @@ async fn test_embedding_dims(host: &str, port: u16) -> bool {
 // ─── Build Prism ─────────────────────────────────────────────────────────────
 
 pub fn build_prism(repo_root: &std::path::Path) -> Result<String, String> {
-    let prism_dir = repo_root.join("prism-mcp");
-    if !prism_dir.exists() {
-        return Err("prism-mcp directory not found. Run git submodule update --init".into());
-    }
+    // Search for prism-mcp in multiple locations:
+    // 1. Next to launcher exe (package layout)
+    // 2. Repo root (dev layout)
+    // 3. Sibling of exe parent (e.g. C:\TOOLS\Bonzai\prism-mcp)
+    let candidates = {
+        let mut c = vec![repo_root.join("prism-mcp")];
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                c.push(exe_dir.join("prism-mcp"));
+                // Also check parent of exe dir (if exe is in bin/ or system/)
+                if let Some(parent) = exe_dir.parent() {
+                    c.push(parent.join("prism-mcp"));
+                }
+            }
+        }
+        c
+    };
+    let prism_dir = candidates.iter().find(|p| p.join("package.json").exists())
+        .ok_or("prism-mcp directory not found. Place it next to the launcher or run git submodule update --init")?
+        .clone();
 
     let npm = find_npm_exe().ok_or("npm not found. Install Node.js from nodejs.org")?;
 
@@ -506,9 +545,9 @@ fn deploy_claude_code(name: &str, entry: &serde_json::Value) -> Result<String, S
     let env = entry["env"].as_object();
 
     let mut cmd = Command::new("claude");
-    cmd.arg("mcp").arg("add").arg("-s").arg("user");
+    cmd.arg("mcp").arg("add").arg("-s").arg("user").arg(name);
 
-    // Add env vars
+    // Add env vars after the server name
     if let Some(env_map) = env {
         for (key, val) in env_map {
             if let Some(v) = val.as_str() {
@@ -517,7 +556,7 @@ fn deploy_claude_code(name: &str, entry: &serde_json::Value) -> Result<String, S
         }
     }
 
-    cmd.arg(name).arg("--").arg(command);
+    cmd.arg("--").arg(command);
     for a in &args {
         cmd.arg(a);
     }
