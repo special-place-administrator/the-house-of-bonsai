@@ -77,16 +77,25 @@ pub struct PrismReadiness {
     pub prism_built: bool,
     pub dist_path: PathBuf,
     pub node_path: PathBuf,
+    /// Pre-built prism-mcp-server.exe (no Node.js needed)
+    pub prism_exe: Option<PathBuf>,
+    /// Pre-built bonsai-mcp-server.exe (no Node.js needed)
+    pub bonsai_exe: Option<PathBuf>,
 }
 
 impl PrismReadiness {
     pub fn all_ok(&self) -> bool {
+        let servers_ready = self.prism_exe.is_some()
+            || (self.node_available && self.npm_available && self.prism_built);
         self.text_ok
             && self.embedding_ok
             && self.embedding_dims_ok
-            && self.node_available
-            && self.npm_available
-            && self.prism_built
+            && servers_ready
+    }
+
+    /// True when pre-built exe files are available (no Node.js needed)
+    pub fn has_exe_mode(&self) -> bool {
+        self.prism_exe.is_some()
     }
 }
 
@@ -184,6 +193,9 @@ pub async fn check_prism_readiness(
     let (text_port, embed_port) = discover_endpoints(config);
     let host = &config.host;
 
+    // Search for pre-built exe files first (package layout), then fall back to node
+    let (prism_exe, bonsai_exe) = find_prebuilt_exes(repo_root);
+
     // Search for prism-mcp: next to exe first (package layout), then repo root (dev layout)
     let prism_dir = {
         let mut found = repo_root.join("prism-mcp");
@@ -228,10 +240,51 @@ pub async fn check_prism_readiness(
         embedding_dims_ok,
         node_available: !node_path.as_os_str().is_empty(),
         npm_available,
-        prism_built: dist_path.exists(),
+        prism_built: dist_path.exists() || prism_exe.is_some(),
         dist_path,
         node_path,
+        prism_exe,
+        bonsai_exe,
     }
+}
+
+/// Search for pre-built standalone exe files next to the launcher or in the repo
+fn find_prebuilt_exes(repo_root: &std::path::Path) -> (Option<PathBuf>, Option<PathBuf>) {
+    let mut search_dirs: Vec<PathBuf> = Vec::new();
+
+    // 1. Next to launcher exe (package layout)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            search_dirs.push(exe_dir.to_path_buf());
+            // Also check system/ subfolder
+            search_dirs.push(exe_dir.join("system"));
+        }
+    }
+    // 2. Repo root (dev layout)
+    search_dirs.push(repo_root.to_path_buf());
+    // 3. Inside submodule build outputs
+    search_dirs.push(repo_root.join("prism-mcp"));
+    search_dirs.push(repo_root.join("bonsai-mcp"));
+
+    let mut prism_exe = None;
+    let mut bonsai_exe = None;
+
+    for dir in &search_dirs {
+        if prism_exe.is_none() {
+            let candidate = dir.join("prism-mcp-server.exe");
+            if candidate.exists() {
+                prism_exe = Some(candidate);
+            }
+        }
+        if bonsai_exe.is_none() {
+            let candidate = dir.join("bonsai-mcp-server.exe");
+            if candidate.exists() {
+                bonsai_exe = Some(candidate);
+            }
+        }
+    }
+
+    (prism_exe, bonsai_exe)
 }
 
 async fn test_embedding_dims(host: &str, port: u16) -> bool {
@@ -258,16 +311,18 @@ async fn test_embedding_dims(host: &str, port: u16) -> bool {
 // ─── Build Prism ─────────────────────────────────────────────────────────────
 
 pub fn build_prism(repo_root: &std::path::Path) -> Result<String, String> {
-    // Search for prism-mcp in multiple locations:
-    // 1. Next to launcher exe (package layout)
-    // 2. Repo root (dev layout)
-    // 3. Sibling of exe parent (e.g. C:\TOOLS\Bonzai\prism-mcp)
+    // Check for pre-built exe first — no build needed
+    let (prism_exe, _) = find_prebuilt_exes(repo_root);
+    if let Some(exe) = prism_exe {
+        return Ok(format!("Pre-built exe ready: {}", exe.display()));
+    }
+
+    // Fall back to npm build from source
     let candidates = {
         let mut c = vec![repo_root.join("prism-mcp")];
         if let Ok(exe) = std::env::current_exe() {
             if let Some(exe_dir) = exe.parent() {
                 c.push(exe_dir.join("prism-mcp"));
-                // Also check parent of exe dir (if exe is in bin/ or system/)
                 if let Some(parent) = exe_dir.parent() {
                     c.push(parent.join("prism-mcp"));
                 }
@@ -276,12 +331,11 @@ pub fn build_prism(repo_root: &std::path::Path) -> Result<String, String> {
         c
     };
     let prism_dir = candidates.iter().find(|p| p.join("package.json").exists())
-        .ok_or("prism-mcp directory not found. Place it next to the launcher or run git submodule update --init")?
+        .ok_or("prism-mcp not found. Place prism-mcp-server.exe next to the launcher, or run git submodule update --init")?
         .clone();
 
-    let npm = find_npm_exe().ok_or("npm not found. Install Node.js from nodejs.org")?;
+    let npm = find_npm_exe().ok_or("npm not found. Install Node.js or place prism-mcp-server.exe next to the launcher")?;
 
-    // npm install
     let install = Command::new(&npm)
         .arg("install")
         .arg("--production")
@@ -294,7 +348,6 @@ pub fn build_prism(repo_root: &std::path::Path) -> Result<String, String> {
         return Err(format!("npm install failed: {}", stderr));
     }
 
-    // npm run build
     let build = Command::new(&npm)
         .arg("run")
         .arg("build")
@@ -433,12 +486,18 @@ pub fn build_mcp_entry(
         .map(|s| s.alias.as_str())
         .unwrap_or("nomic-embed-text-v2-moe");
 
-    let node_path = readiness.node_path.display().to_string();
-    let dist_path = readiness.dist_path.display().to_string();
+    // Use pre-built exe if available, otherwise fall back to node + dist/server.js
+    let (command, args) = if let Some(ref exe) = readiness.prism_exe {
+        (exe.display().to_string(), Vec::<String>::new())
+    } else {
+        let node_path = readiness.node_path.display().to_string();
+        let dist_path = readiness.dist_path.display().to_string();
+        (node_path, vec![dist_path])
+    };
 
     serde_json::json!({
-        "command": node_path,
-        "args": [dist_path],
+        "command": command,
+        "args": args,
         "env": {
             "TEXT_PROVIDER": "llamacpp",
             "EMBEDDING_PROVIDER": "llamacpp",
@@ -458,17 +517,23 @@ pub fn build_bonsai_entry(
     api_port: u16,
     api_host: &str,
 ) -> serde_json::Value {
-    let node_path = readiness.node_path.display().to_string();
-    let dist_path = repo_root
-        .join("bonsai-mcp")
-        .join("dist")
-        .join("server.js")
-        .display()
-        .to_string();
+    // Use pre-built exe if available, otherwise fall back to node + dist/server.js
+    let (command, args) = if let Some(ref exe) = readiness.bonsai_exe {
+        (exe.display().to_string(), Vec::<String>::new())
+    } else {
+        let node_path = readiness.node_path.display().to_string();
+        let dist_path = repo_root
+            .join("bonsai-mcp")
+            .join("dist")
+            .join("server.js")
+            .display()
+            .to_string();
+        (node_path, vec![dist_path])
+    };
 
     serde_json::json!({
-        "command": node_path,
-        "args": [dist_path],
+        "command": command,
+        "args": args,
         "env": {
             "BONSAI_API_PORT": api_port.to_string(),
             "BONSAI_API_HOST": api_host,
@@ -477,12 +542,18 @@ pub fn build_bonsai_entry(
 }
 
 pub fn build_bonsai_mcp(repo_root: &std::path::Path) -> Result<String, String> {
-    let bonsai_dir = repo_root.join("bonsai-mcp");
-    if !bonsai_dir.exists() {
-        return Err("bonsai-mcp directory not found".into());
+    // Check for pre-built exe first
+    let (_, bonsai_exe) = find_prebuilt_exes(repo_root);
+    if let Some(exe) = bonsai_exe {
+        return Ok(format!("Pre-built exe ready: {}", exe.display()));
     }
 
-    let npm = find_npm_exe().ok_or("npm not found. Install Node.js from nodejs.org")?;
+    let bonsai_dir = repo_root.join("bonsai-mcp");
+    if !bonsai_dir.exists() {
+        return Err("bonsai-mcp not found. Place bonsai-mcp-server.exe next to the launcher".into());
+    }
+
+    let npm = find_npm_exe().ok_or("npm not found. Install Node.js or place bonsai-mcp-server.exe next to the launcher")?;
 
     // npm install
     let install = Command::new(&npm)

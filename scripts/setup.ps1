@@ -61,7 +61,7 @@ if (-not (Test-Path $llamaDir)) {
 Write-Host "[3/5] Building llama.cpp..." -ForegroundColor Yellow
 
 $buildDir = Join-Path $llamaDir "build"
-$backendFlags = "-DGGML_NATIVE=ON -DGGML_CCACHE=OFF"
+$backendFlags = "-DGGML_NATIVE=OFF -DGGML_CCACHE=OFF"
 
 # Detect CUDA
 $cudaPath = $env:CUDA_PATH

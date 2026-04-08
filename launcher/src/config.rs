@@ -96,20 +96,43 @@ impl ModelSlot {
             args.push("--embedding".into());
         }
 
-        // Backend "cpu" forces gpu_layers to 0 regardless of config
+        // Backend-specific adjustments
         let effective_gpu_layers: String;
-        if self.backend == "cpu" {
-            effective_gpu_layers = "0".into();
-        } else {
-            effective_gpu_layers = self.gpu_layers.clone();
+        let effective_cache_k: String;
+        let effective_cache_v: String;
+        let mut extra_flags: Vec<String> = Vec::new();
+
+        let safe_cache = |ct: &str| -> String {
+            if ct.starts_with("turbo") { "f16".into() } else { ct.to_string() }
+        };
+
+        match self.backend.as_str() {
+            "cpu" => {
+                effective_gpu_layers = "0".into();
+                effective_cache_k = self.cache_type_k.clone(); // turbo3 works on CPU
+                effective_cache_v = self.cache_type_v.clone();
+                extra_flags.push("--no-warmup".into()); // CPU warmup is very slow
+            }
+            "vulkan" => {
+                effective_gpu_layers = self.gpu_layers.clone();
+                // Vulkan doesn't support turbo SET_ROWS op — fall back to f16
+                effective_cache_k = safe_cache(&self.cache_type_k);
+                effective_cache_v = safe_cache(&self.cache_type_v);
+            }
+            _ => {
+                // "auto" or "cuda" — all cache types supported
+                effective_gpu_layers = self.gpu_layers.clone();
+                effective_cache_k = self.cache_type_k.clone();
+                effective_cache_v = self.cache_type_v.clone();
+            }
         }
 
         let pairs: &[(&str, &str)] = &[
             ("-c",  &self.context_size),
             ("-ngl", &effective_gpu_layers),
             ("-fa", &self.flash_attention),
-            ("-ctk", &self.cache_type_k),
-            ("-ctv", &self.cache_type_v),
+            ("-ctk", &effective_cache_k),
+            ("-ctv", &effective_cache_v),
             ("-np", &self.parallel),
             ("-b",  &self.batch_size),
             ("-ub", &self.ubatch_size),
@@ -144,6 +167,8 @@ impl ModelSlot {
         } else {
             args.push("--webui".into());
         }
+
+        args.extend(extra_flags);
 
         args
     }
@@ -250,7 +275,7 @@ fn default_port() -> u16 { 8080 }
 fn default_context_size() -> String { "32768".into() }
 fn default_gpu_layers() -> String { "auto".into() }
 fn default_flash_attention() -> String { "on".into() }
-fn default_cache_type() -> String { "turbo3".into() }
+fn default_cache_type() -> String { "f16".into() }
 fn default_layer_adaptive() -> String { "1".into() }
 fn default_parallel() -> String { "1".into() }
 fn default_batch_size() -> String { "2048".into() }
