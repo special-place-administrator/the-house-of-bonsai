@@ -184,13 +184,15 @@ pub async fn check_prism_readiness(
     let (text_port, embed_port) = discover_endpoints(config);
     let host = &config.host;
 
-    // Search for prism-mcp in multiple locations
+    // Search for prism-mcp: next to exe first (package layout), then repo root (dev layout)
     let prism_dir = {
         let mut found = repo_root.join("prism-mcp");
         if let Ok(exe) = std::env::current_exe() {
             if let Some(exe_dir) = exe.parent() {
                 let next_to_exe = exe_dir.join("prism-mcp");
-                if next_to_exe.join("package.json").exists() { found = next_to_exe; }
+                if next_to_exe.join("package.json").exists() {
+                    found = next_to_exe;
+                }
             }
         }
         found
@@ -536,6 +538,11 @@ pub fn deploy_to_harness(
 }
 
 fn deploy_claude_code(name: &str, entry: &serde_json::Value) -> Result<String, String> {
+    // Remove existing entry first — `claude mcp add` refuses to overwrite
+    let _ = Command::new("claude")
+        .args(["mcp", "remove", name, "-s", "user"])
+        .output();
+
     let command = entry["command"].as_str().unwrap_or("node");
     let args: Vec<&str> = entry["args"]
         .as_array()
