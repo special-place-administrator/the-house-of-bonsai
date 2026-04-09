@@ -546,13 +546,14 @@ pub fn read_gguf_header(path: &Path) -> io::Result<GgufMetadata> {
     for _ in 0..n_kv {
         let key = read_string(&mut r)?;
 
-        // Skip tokenizer arrays entirely — they're huge and we don't need them
+        let value = read_value(&mut r)?;
+
+        // Skip large tokenizer arrays — we don't need tokens/merges/scores
+        // but DO keep reading because general.file_type may come after them
         if key.starts_with("tokenizer.ggml.") && key != "tokenizer.ggml.model" && key != "tokenizer.ggml.pre" {
-            // We've passed all the metadata we need — bail out early
-            break;
+            continue;
         }
 
-        let value = read_value(&mut r)?;
         kv.insert(key, value);
     }
 

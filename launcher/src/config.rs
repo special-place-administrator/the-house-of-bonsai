@@ -76,102 +76,115 @@ impl ModelSlot {
         }
     }
 
-    /// Build the argument list for llama-server for this slot.
-    ///
-    /// Per-slot args come from `self`; shared / global args come from `config`.
-    pub fn build_server_args(&self, config: &LauncherConfig) -> Vec<String> {
-        let mut args = Vec::new();
+        pub fn build_server_args(&self, config: &LauncherConfig) -> Vec<String> {
+            let mut args = Vec::new();
 
-        args.extend(["--host".into(), config.host.clone()]);
-        args.extend(["--port".into(), self.port.to_string()]);
+            args.extend(["--host".into(), config.host.clone()]);
+            args.extend(["--port".into(), self.port.to_string()]);
 
-        if !self.model_path.is_empty() {
-            args.extend(["-m".into(), self.model_path.clone()]);
-        }
-        if !self.alias.is_empty() {
-            args.extend(["-a".into(), self.alias.clone()]);
-        }
-
-        if self.embedding_mode {
-            args.push("--embedding".into());
-        }
-
-        // Backend-specific adjustments
-        let effective_gpu_layers: String;
-        let effective_cache_k: String;
-        let effective_cache_v: String;
-        let mut extra_flags: Vec<String> = Vec::new();
-
-        let safe_cache = |ct: &str| -> String {
-            if ct.starts_with("turbo") { "f16".into() } else { ct.to_string() }
-        };
-
-        match self.backend.as_str() {
-            "cpu" => {
-                effective_gpu_layers = "0".into();
-                effective_cache_k = self.cache_type_k.clone(); // turbo3 works on CPU
-                effective_cache_v = self.cache_type_v.clone();
-                extra_flags.push("--no-warmup".into()); // CPU warmup is very slow
+            if !self.model_path.is_empty() {
+                args.extend(["-m".into(), self.model_path.clone()]);
             }
-            "vulkan" => {
-                effective_gpu_layers = self.gpu_layers.clone();
-                // Vulkan doesn't support turbo SET_ROWS op — fall back to f16
-                effective_cache_k = safe_cache(&self.cache_type_k);
-                effective_cache_v = safe_cache(&self.cache_type_v);
+            if !self.alias.is_empty() {
+                args.extend(["-a".into(), self.alias.clone()]);
             }
-            _ => {
-                // "auto" or "cuda" — all cache types supported
-                effective_gpu_layers = self.gpu_layers.clone();
-                effective_cache_k = self.cache_type_k.clone();
-                effective_cache_v = self.cache_type_v.clone();
+
+            if self.embedding_mode {
+                args.push("--embedding".into());
             }
-        }
 
-        let pairs: &[(&str, &str)] = &[
-            ("-c",  &self.context_size),
-            ("-ngl", &effective_gpu_layers),
-            ("-fa", &self.flash_attention),
-            ("-ctk", &effective_cache_k),
-            ("-ctv", &effective_cache_v),
-            ("-np", &self.parallel),
-            ("-b",  &self.batch_size),
-            ("-ub", &self.ubatch_size),
-            ("-t",  &config.threads),
-            ("--threads-http", &config.threads_http),
-            ("-lv", &config.log_verbosity),
-            ("--temp", &self.temp),
-            ("--top-p", &self.top_p),
-            ("--top-k", &self.top_k),
-            ("--min-p", &self.min_p),
-            ("--reasoning-budget", &self.reasoning_budget),
-        ];
+            // Backend-specific adjustments
+            let effective_gpu_layers: String;
+            let effective_cache_k: String;
+            let effective_cache_v: String;
+            let effective_context: String;
+            let effective_batch: String;
+            let effective_ubatch: String;
+            let mut extra_flags: Vec<String> = Vec::new();
 
-        for (flag, value) in pairs {
-            if !value.is_empty() {
-                args.extend([flag.to_string(), value.to_string()]);
+            let safe_cache = |ct: &str| -> String {
+                if ct.starts_with("turbo") { "f16".into() } else { ct.to_string() }
+            };
+
+            match self.backend.as_str() {
+                "cpu" => {
+                    effective_gpu_layers = "0".into();
+                    // CPU has no CUDA kernels — turbo cache types crash or are unsupported
+                    effective_cache_k = safe_cache(&self.cache_type_k);
+                    effective_cache_v = safe_cache(&self.cache_type_v);
+                    effective_context = self.context_size.clone();
+                    effective_batch = self.batch_size.clone();
+                    effective_ubatch = self.ubatch_size.clone();
+                    extra_flags.push("--no-warmup".into()); // CPU warmup is very slow
+                }
+                "vulkan" => {
+                    effective_gpu_layers = self.gpu_layers.clone();
+                    // Vulkan doesn't support turbo SET_ROWS op — fall back to f16
+                    effective_cache_k = safe_cache(&self.cache_type_k);
+                    effective_cache_v = safe_cache(&self.cache_type_v);
+                    effective_context = self.context_size.clone();
+                    effective_batch = self.batch_size.clone();
+                    effective_ubatch = self.ubatch_size.clone();
+                }
+                _ => {
+                    // "auto" or "cuda" — all cache types supported
+                    effective_gpu_layers = self.gpu_layers.clone();
+                    effective_cache_k = self.cache_type_k.clone();
+                    effective_cache_v = self.cache_type_v.clone();
+                    effective_context = self.context_size.clone();
+                    effective_batch = self.batch_size.clone();
+                    effective_ubatch = self.ubatch_size.clone();
+                }
             }
+
+            // CPU backend does not support flash attention
+            let effective_fa = if self.backend == "cpu" { "off".to_string() } else { self.flash_attention.clone() };
+
+            let pairs: &[(&str, &str)] = &[
+                ("-c",  &effective_context),
+                ("-ngl", &effective_gpu_layers),
+                ("-fa", &effective_fa),
+                ("-ctk", &effective_cache_k),
+                ("-ctv", &effective_cache_v),
+                ("-np", &self.parallel),
+                ("-b",  &effective_batch),
+                ("-ub", &effective_ubatch),
+                ("-t",  &config.threads),
+                ("--threads-http", &config.threads_http),
+                ("-lv", &config.log_verbosity),
+                ("--temp", &self.temp),
+                ("--top-p", &self.top_p),
+                ("--top-k", &self.top_k),
+                ("--min-p", &self.min_p),
+                ("--reasoning-budget", &self.reasoning_budget),
+            ];
+
+            for (flag, value) in pairs {
+                if !value.is_empty() {
+                    args.extend([flag.to_string(), value.to_string()]);
+                }
+            }
+
+            if !config.api_key.is_empty() {
+                args.extend(["--api-key".into(), config.api_key.clone()]);
+            }
+
+            if config.no_mmap {
+                args.push("--no-mmap".into());
+            } else {
+                args.push("--mmap".into());
+            }
+
+            if config.disable_web_ui {
+                args.push("--no-webui".into());
+            } else {
+                args.push("--webui".into());
+            }
+
+            args.extend(extra_flags);
+
+            args
         }
-
-        if !config.api_key.is_empty() {
-            args.extend(["--api-key".into(), config.api_key.clone()]);
-        }
-
-        if config.no_mmap {
-            args.push("--no-mmap".into());
-        } else {
-            args.push("--mmap".into());
-        }
-
-        if config.disable_web_ui {
-            args.push("--no-webui".into());
-        } else {
-            args.push("--webui".into());
-        }
-
-        args.extend(extra_flags);
-
-        args
-    }
 
     /// Build the full command preview string for this slot.
     pub fn command_preview(&self, server_exe: &Path, config: &LauncherConfig) -> String {

@@ -120,135 +120,151 @@ impl SystemResources {
         self.cpu_threads.saturating_sub(reserved)
     }
 
-    /// Auto-tune a single model slot based on detected resources and model size.
-    ///
-    /// When `meta` is provided the actual model architecture (KV heads,
-    /// head dim, layer count, native context length) is used for accurate
-    /// KV-cache sizing.  Without it, a generic 8B-class default is assumed.
-    ///
-    /// Returns the recommended CPU threads so the caller can apply them to
-    /// the shared config.
-    pub fn auto_tune(
-        &self,
-        slot: &mut ModelSlot,
-        model_path: &str,
-        meta: Option<&ModelMetadata>,
-    ) -> (u32, u32) {
-        let model_size_mb = if !model_path.is_empty() {
-            Path::new(model_path)
-                .metadata()
-                .map(|m| m.len() / (1024 * 1024))
-                .unwrap_or(0)
-        } else {
-            0
-        };
+        pub fn auto_tune(
+            &self,
+            slot: &mut ModelSlot,
+            model_path: &str,
+            meta: Option<&ModelMetadata>,
+        ) -> (u32, u32) {
+            let model_size_mb = if !model_path.is_empty() {
+                Path::new(model_path)
+                    .metadata()
+                    .map(|m| m.len() / (1024 * 1024))
+                    .unwrap_or(0)
+            } else {
+                0
+            };
 
-        let vram = self.usable_vram_mb();
-        let threads = self.usable_threads();
+            let is_cpu = slot.backend == "cpu";
+            let threads = self.usable_threads();
+            let is_embedding = meta.map(|m| m.capabilities.embedding).unwrap_or(false);
 
-        // Estimate VRAM budget after model loading
-        let model_vram = (model_size_mb as f64 * 1.1) as u64;
-        let remaining_vram = vram.saturating_sub(model_vram);
+            // Memory budget: use RAM for CPU, VRAM for GPU backends
+            let budget_mb = if is_cpu {
+                self.usable_ram_mb()
+            } else {
+                self.usable_vram_mb()
+            };
 
-        // -- Context size --
-        let bytes_per_elem = match slot.cache_type_k.as_str() {
-            "f16" => 2.0_f64,
-            "q8_0" => 1.0,
-            "turbo2" => 0.25,
-            "turbo3" => 0.375,
-            "turbo4" => 0.5,
-            _ => 2.0,
-        };
+            let model_mem = (model_size_mb as f64 * 1.1) as u64;
+            let remaining = budget_mb.saturating_sub(model_mem);
 
-        let (kv_bytes_per_token, native_ctx) = if let Some(m) = meta {
-            let bpt = m.kv_bytes_per_token_per_layer().unwrap_or(8 * 128 * 2);
-            let layers = m.n_layers.unwrap_or(36) as u64;
-            let ctx_cap = m.context_length.unwrap_or(65536) as u64;
-            (bpt * layers, ctx_cap)
-        } else {
-            (589_824_u64, 65_536_u64)
-        };
+            // -- Cache type --
+            // CPU/Vulkan: turbo cache types require CUDA kernels, fall back to f16
+            // CUDA: turbo3 for quality, turbo2 if tight on VRAM
+            if is_cpu {
+                slot.cache_type_k = "f16".into();
+                slot.cache_type_v = "f16".into();
+            } else if slot.backend == "vulkan" {
+                slot.cache_type_k = "f16".into();
+                slot.cache_type_v = "f16".into();
+            } else if remaining > model_mem * 2 {
+                slot.cache_type_k = "turbo3".into();
+                slot.cache_type_v = "turbo3".into();
+            } else if remaining > model_mem {
+                slot.cache_type_k = "turbo3".into();
+                slot.cache_type_v = "turbo3".into();
+            } else {
+                slot.cache_type_k = "turbo2".into();
+                slot.cache_type_v = "turbo2".into();
+            }
 
-        // Per 1K context in MB
-        let kv_per_1k_ctx = (kv_bytes_per_token as f64 * 1024.0 * bytes_per_elem / (1024.0 * 1024.0)) as u64;
-        let max_ctx_by_vram = if kv_per_1k_ctx > 0 {
-            let kv_budget = remaining_vram.saturating_sub(512);
-            (kv_budget / kv_per_1k_ctx) * 1024
-        } else {
-            32768
-        };
-        let ctx = std::cmp::min(max_ctx_by_vram, native_ctx);
-        let ctx = (ctx / 4096) * 4096;
-        let ctx = std::cmp::max(ctx, 4096);
-        slot.context_size = ctx.to_string();
+            // -- Context size --
+            let bytes_per_elem = match slot.cache_type_k.as_str() {
+                "f16" => 2.0_f64,
+                "q8_0" => 1.0,
+                "turbo2" => 0.25,
+                "turbo3" => 0.375,
+                "turbo4" => 0.5,
+                _ => 2.0,
+            };
 
-        // -- Batch size --
-        if remaining_vram > 8000 {
-            slot.batch_size = "2048".into();
-            slot.ubatch_size = "512".into();
-        } else if remaining_vram > 4000 {
-            slot.batch_size = "1024".into();
-            slot.ubatch_size = "256".into();
-        } else {
-            slot.batch_size = "512".into();
-            slot.ubatch_size = "128".into();
+            let (kv_bytes_per_token, native_ctx) = if let Some(m) = meta {
+                let bpt = m.kv_bytes_per_token_per_layer().unwrap_or(8 * 128 * 2);
+                let layers = m.n_layers.unwrap_or(36) as u64;
+                let ctx_cap = m.context_length.unwrap_or(65536) as u64;
+                (bpt * layers, ctx_cap)
+            } else {
+                (589_824_u64, 65_536_u64)
+            };
+
+            let kv_per_1k_ctx = (kv_bytes_per_token as f64 * 1024.0 * bytes_per_elem / (1024.0 * 1024.0)) as u64;
+            let max_ctx_by_mem = if kv_per_1k_ctx > 0 {
+                let kv_budget = remaining.saturating_sub(512);
+                (kv_budget / kv_per_1k_ctx) * 1024
+            } else {
+                32768
+            };
+
+            // CPU: cap context more aggressively since inference is slow
+            let ctx_cap = if is_cpu {
+                std::cmp::min(native_ctx, 8192)
+            } else {
+                native_ctx
+            };
+            let ctx = std::cmp::min(max_ctx_by_mem, ctx_cap);
+            let ctx = (ctx / 4096) * 4096;
+            let ctx = std::cmp::max(ctx, 4096);
+            slot.context_size = ctx.to_string();
+
+            // -- Batch size --
+            if is_cpu {
+                // CPU: smaller batches to avoid memory pressure and long stalls
+                slot.batch_size = "512".into();
+                slot.ubatch_size = "128".into();
+            } else if remaining > 8000 {
+                slot.batch_size = "2048".into();
+                slot.ubatch_size = "512".into();
+            } else if remaining > 4000 {
+                slot.batch_size = "1024".into();
+                slot.ubatch_size = "256".into();
+            } else {
+                slot.batch_size = "512".into();
+                slot.ubatch_size = "128".into();
+            }
+
+            // -- Flash attention --
+            // CPU: not supported. GPU: on by default.
+            if is_cpu {
+                slot.flash_attention = "off".into();
+            } else {
+                slot.flash_attention = "on".into();
+            }
+
+            // -- Parallel slots --
+            let kv_per_slot = (ctx / 1024) * kv_per_1k_ctx;
+            let max_slots = if is_embedding {
+                2
+            } else if is_cpu {
+                1 // CPU: single slot to avoid contention
+            } else if kv_per_slot > 0 {
+                let kv_budget = remaining.saturating_sub(512);
+                std::cmp::min(kv_budget / kv_per_slot, 8)
+            } else {
+                1
+            };
+            slot.parallel = std::cmp::max(max_slots, 1).to_string();
+
+            // -- Layer adaptive --
+            // Off for CPU/embedding (no KV cache compression benefit)
+            // On (1) for GPU text models with turbo cache
+            if is_embedding || is_cpu {
+                slot.turbo_layer_adaptive = "off".into();
+            } else {
+                slot.turbo_layer_adaptive = "1".into();
+            }
+
+            // -- GPU layers --
+            if is_cpu {
+                slot.gpu_layers = "0".into();
+            } else {
+                slot.gpu_layers = "auto".into();
+            }
+
+            // Return recommended threads so the caller can set them on the shared config
+            let http_threads = std::cmp::max(threads / 4, 2);
+            (threads, http_threads)
         }
-
-        // -- Flash attention --
-        // On by default — nearly all modern architectures support it.
-        // Only disable if model metadata explicitly indicates issues.
-        slot.flash_attention = "on".into();
-
-        // -- Cache type --
-        // Derive from model size vs available VRAM:
-        //   - If model leaves plenty of VRAM headroom → turbo3 (best quality/compression)
-        //   - If tight on VRAM → turbo2 (more compression)
-        //   - Embedding models with small embedding dim → turbo3 is fine
-        if remaining_vram > model_vram * 2 {
-            // Plenty of room — turbo3 gives good quality with 3-bit KV
-            slot.cache_type_k = "turbo3".into();
-            slot.cache_type_v = "turbo3".into();
-        } else if remaining_vram > model_vram {
-            // Moderate room — turbo3 still fine
-            slot.cache_type_k = "turbo3".into();
-            slot.cache_type_v = "turbo3".into();
-        } else {
-            // Tight — use turbo2 for max compression
-            slot.cache_type_k = "turbo2".into();
-            slot.cache_type_v = "turbo2".into();
-        }
-
-        // -- Parallel slots --
-        // Embedding models: lower parallel (2) since each request is cheap
-        // Text models: compute from VRAM budget
-        let is_embedding = meta.map(|m| m.capabilities.embedding).unwrap_or(false);
-        let kv_per_slot = (ctx / 1024) * kv_per_1k_ctx;
-        let max_slots = if is_embedding {
-            2
-        } else if kv_per_slot > 0 {
-            let kv_budget = remaining_vram.saturating_sub(512);
-            std::cmp::min(kv_budget / kv_per_slot, 8)
-        } else {
-            1
-        };
-        slot.parallel = std::cmp::max(max_slots, 1).to_string();
-
-        // -- Layer adaptive --
-        // Off for embedding models (no KV cache compression benefit)
-        // On (1) for text models with turbo cache
-        if is_embedding {
-            slot.turbo_layer_adaptive = "off".into();
-        } else {
-            slot.turbo_layer_adaptive = "1".into();
-        }
-
-        // -- GPU layers --
-        slot.gpu_layers = "auto".into();
-
-        // Return recommended threads so the caller can set them on the shared config
-        let http_threads = std::cmp::max(threads / 4, 2);
-        (threads, http_threads)
-    }
 
     /// Generate a human-readable summary
     pub fn summary(&self) -> String {
