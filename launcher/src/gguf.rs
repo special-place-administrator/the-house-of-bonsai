@@ -296,7 +296,7 @@ impl ModelMetadata {
         /// Check if this model is compatible with the given backend.
         /// Returns Ok(()) if compatible, Err(reason) if not.
         pub fn check_backend_compat(&self, backend: &str, available_backends: &[&str]) -> Result<(), String> {
-            let model_name = self.name.as_deref().unwrap_or("This model");
+            let _model_name = self.name.as_deref().unwrap_or("This model");
 
             // Check if the chosen backend is even available on this system
             if backend != "auto" && !available_backends.contains(&backend) {
@@ -306,14 +306,10 @@ impl ModelMetadata {
                 ));
             }
 
-            // Q1_0 models work on CUDA (optimized) and CPU (reference).
-            // Vulkan backend does not support Q1_0 types.
-            if self.requires_cuda && backend == "vulkan" {
-                return Err(format!(
-                    "{} uses Q1_0 quantization which is not supported on Vulkan. Use CUDA (fastest) or CPU.",
-                    model_name
-                ));
-            }
+            // Q1_0 models work on all backends:
+            // - CUDA: optimized int8 MMQ kernels (fastest)
+            // - CPU: reference vec_dot implementation
+            // - Vulkan: GPU-accelerated with CPU fallback for Q1_0 mat-mul ops
 
             Ok(())
         }
