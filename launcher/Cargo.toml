@@ -44,3 +44,5 @@ libc = "0.2"
 opt-level = "s"
 lto = true
 strip = true
+codegen-units = 1
+panic = "abort"

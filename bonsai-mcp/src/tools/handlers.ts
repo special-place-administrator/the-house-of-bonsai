@@ -24,7 +24,7 @@ function authHeaders(): Record<string, string> {
 }
 
 async function apiGet(path: string): Promise<unknown> {
-  const resp = await fetch(`${BASE}${path}`);
+  const resp = await fetch(`${BASE}${path}`, { headers: authHeaders() });
   if (!resp.ok) {
     const text = await resp.text();
     throw new Error(`Bonsai API ${path} returned ${resp.status}: ${text}`);
@@ -56,10 +56,8 @@ interface SlotInfo {
 }
 
 async function resolveModelToSlot(model: string): Promise<number> {
-  const data = (await apiGet("/api/status")) as {
-    ok: boolean;
-    data: { slots: SlotInfo[] };
-  };
+  const data = (await apiGet("/api/status")) as { ok?: boolean; data?: { slots?: SlotInfo[] } };
+  if (!data?.data?.slots) throw new Error("Unexpected API response shape from /api/status");
   const slots = data.data.slots;
   const needle = model.toLowerCase();
 
@@ -77,7 +75,7 @@ async function resolveModelToSlot(model: string): Promise<number> {
       `Model "${model}" not found in any slot.\nAvailable slots:\n${available}`
     );
   }
-  return idx;
+  return slots[idx].index;
 }
 
 // ---------------------------------------------------------------------------

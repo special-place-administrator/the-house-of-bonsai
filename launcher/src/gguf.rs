@@ -13,6 +13,7 @@ use std::path::Path;
 // Value types stored in the GGUF KV header
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum GgufValue {
     Uint8(u8),
@@ -94,6 +95,7 @@ impl GgufValue {
 // Raw GGUF metadata (HashMap of all KV pairs)
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct GgufMetadata {
     pub version: u32,
@@ -134,6 +136,7 @@ impl ModelCapabilities {
 // High-level model metadata extracted from the raw KV pairs
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct ModelMetadata {
     pub name: Option<String>,

@@ -8,6 +8,7 @@ pub struct ModelEntry {
     pub size_bytes: u64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModelSource {
     GgufFile,
@@ -84,6 +85,7 @@ impl ModelCatalog {
         }
     }
 
+    #[allow(dead_code)]
     fn scan_ollama(entries: &mut Vec<ModelEntry>, seen: &mut std::collections::HashSet<String>) {
         let ollama_root = Self::find_ollama_root();
         let Some(root) = ollama_root else { return };
@@ -95,6 +97,7 @@ impl ModelCatalog {
         Self::walk_ollama_manifests(&manifests_root, &manifests_root, &blobs_root, entries, seen);
     }
 
+    #[allow(dead_code)]
     fn find_ollama_root() -> Option<PathBuf> {
         // Check OLLAMA_MODELS env var
         if let Ok(val) = std::env::var("OLLAMA_MODELS") {
@@ -103,10 +106,6 @@ impl ModelCatalog {
                 if p.is_dir() { return Some(p); }
             }
         }
-
-        // Check shared model root
-        let shared = PathBuf::from(r"C:\AI_STUFF\LLM_MODEL\ollama");
-        if shared.is_dir() { return Some(shared); }
 
         // Default location
         if let Some(home) = dirs::home_dir() {
@@ -117,6 +116,7 @@ impl ModelCatalog {
         None
     }
 
+    #[allow(dead_code)]
     fn walk_ollama_manifests(
         dir: &Path,
         manifests_root: &Path,
@@ -188,6 +188,7 @@ impl ModelCatalog {
         }
     }
 
+    #[allow(dead_code)]
     pub fn resolve(&self, name: &str) -> Option<&ModelEntry> {
         self.entries.iter().find(|e| {
             e.display_name.eq_ignore_ascii_case(name)

@@ -155,7 +155,7 @@ fn App() -> Element {
     let mut prism_readiness: Signal<Option<prism::PrismReadiness>> = use_signal(|| None);
     let mut harness_probes: Signal<Vec<prism::HarnessProbe>> = use_signal(Vec::new);
     let mut prism_deploy_log: Signal<Vec<String>> = use_signal(Vec::new);
-    let mut prism_deploying = use_signal(|| false);
+    let prism_deploying = use_signal(|| false);
     let prism_dashboard_port = use_signal(|| 3333u16);
 
     // Initialize process manager once
@@ -1180,7 +1180,7 @@ fn DeployPrismModal(
     let on_build_prism = move |_| {
         let root = root_for_build.clone();
         let root2 = root.clone();
-        let cfg = config.read().clone();
+        let _cfg = config.read().clone();
         prism_deploying.set(true);
         prism_deploy_log.with_mut(|l| l.push("Building Prism MCP...".into()));
         spawn(async move {

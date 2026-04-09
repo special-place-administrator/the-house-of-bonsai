@@ -107,12 +107,20 @@ export function isStartModelArgs(
   if (typeof args !== "object" || args === null) return false;
   const a = args as Record<string, unknown>;
   if (a.model !== undefined && typeof a.model !== "string") return false;
-  if (a.slot !== undefined && typeof a.slot !== "number") return false;
+  if (a.slot !== undefined) {
+    if (typeof a.slot !== "number" || !Number.isInteger(a.slot) || a.slot < 0) return false;
+  }
   return a.model !== undefined || a.slot !== undefined;
 }
 
 export function isStopModelArgs(
   args: unknown
 ): args is { model?: string; slot?: number } {
-  return isStartModelArgs(args);
+  if (typeof args !== "object" || args === null) return false;
+  const a = args as Record<string, unknown>;
+  if (a.model !== undefined && typeof a.model !== "string") return false;
+  if (a.slot !== undefined) {
+    if (typeof a.slot !== "number" || !Number.isInteger(a.slot) || a.slot < 0) return false;
+  }
+  return a.model !== undefined || a.slot !== undefined;
 }

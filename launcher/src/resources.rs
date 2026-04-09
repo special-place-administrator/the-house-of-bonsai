@@ -8,6 +8,7 @@ const RESERVE_FRACTION: f64 = 0.10; // Reserve 10% of each resource
 // GPU vendor / backend detection
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum GpuVendor {
     Nvidia,
@@ -339,6 +340,11 @@ fn detect_gpu_vendor_wmi() -> GpuVendor {
     let upper = text.to_uppercase();
 
     // Check for discrete GPU vendors (skip integrated if discrete found)
+    if upper.contains("NVIDIA") || upper.contains("GEFORCE") || upper.contains("QUADRO")
+        || upper.contains("RTX") || upper.contains("GTX")
+    {
+        return GpuVendor::Nvidia;
+    }
     if upper.contains("RADEON") || upper.contains("AMD") {
         return GpuVendor::Amd;
     }

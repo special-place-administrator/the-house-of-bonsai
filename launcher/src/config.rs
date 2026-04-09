@@ -198,6 +198,7 @@ impl ModelSlot {
 /// Helper struct used only for deserializing legacy (pre-slots) config files.
 /// When the JSON has flat `modelPath`, `port`, etc. we migrate them into a
 /// single `ModelSlot`.
+#[allow(dead_code)]
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct LegacyFields {
@@ -360,7 +361,10 @@ impl LauncherConfig {
         // Try normal deserialization first.
         let mut cfg: LauncherConfig = match serde_json::from_str(&content) {
             Ok(c) => c,
-            Err(_) => Self::default(),
+            Err(e) => {
+                tracing::warn!("Failed to parse config {}: {e} — using defaults", path.display());
+                Self::default()
+            }
         };
 
         // Backward compat: if slots is empty (legacy config with flat fields),

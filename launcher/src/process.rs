@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -73,8 +74,8 @@ pub struct ProcessManager {
     server_exe: PathBuf,
     pub slots: Vec<ProcessSlot>,
     pub log_tx: broadcast::Sender<String>,
-    pub stdout_lines: Vec<String>,
-    pub stderr_lines: Vec<String>,
+    pub stdout_lines: VecDeque<String>,
+    pub stderr_lines: VecDeque<String>,
     #[cfg(target_os = "windows")]
     job_handle: Option<JobHandle>,
 }
@@ -84,9 +85,27 @@ pub struct ProcessManager {
 #[cfg(target_os = "windows")]
 struct JobHandle(*mut std::ffi::c_void);
 #[cfg(target_os = "windows")]
+// SAFETY: Windows HANDLE values are process-global kernel object references.
+// The handle is only accessed under the ProcessManager's RwLock.
 unsafe impl Send for JobHandle {}
 #[cfg(target_os = "windows")]
+// SAFETY: Windows HANDLE values are process-global kernel object references.
+// The handle is only accessed under the ProcessManager's RwLock.
 unsafe impl Sync for JobHandle {}
+
+#[cfg(target_os = "windows")]
+impl Drop for JobHandle {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: JobHandle owns the Win32 HANDLE returned by CreateJobObjectW.
+            // CloseHandle is safe to call once on a valid, owned handle.
+            unsafe {
+                unsafe extern "system" { fn CloseHandle(handle: *mut std::ffi::c_void) -> i32; }
+                CloseHandle(self.0);
+            }
+        }
+    }
+}
 
 const MAX_LOG_LINES: usize = 5000;
 
@@ -120,6 +139,11 @@ impl ProcessManager {
         // exits — whether closed normally, crashed, or killed from Task Manager.
         #[cfg(target_os = "windows")]
         let job_handle = {
+            // SAFETY: CreateJobObjectW and SetInformationJobObject are Win32 API
+            // calls that create and configure a kernel Job Object. null attrs and
+            // null name are valid per MSDN (anonymous, inheritable defaults).
+            // The returned handle is immediately wrapped in JobHandle which owns it
+            // and will call CloseHandle on drop.
             unsafe {
                 #[link(name = "kernel32")]
                 unsafe extern "system" {
@@ -132,6 +156,8 @@ impl ProcessManager {
                     let mut info = [0u8; 112];
                     let flags: u32 = 0x2000; // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
                     info[16..20].copy_from_slice(&flags.to_le_bytes());
+                    // SAFETY: info is a correctly-sized stack buffer; class 9 is
+                    // JobObjectExtendedLimitInformation; len matches the buffer size.
                     SetInformationJobObject(job, 9, info.as_ptr(), info.len() as u32);
                     Some(JobHandle(job))
                 } else {
@@ -145,8 +171,8 @@ impl ProcessManager {
             server_exe,
             slots: Vec::new(),
             log_tx,
-            stdout_lines: Vec::new(),
-            stderr_lines: Vec::new(),
+            stdout_lines: VecDeque::new(),
+            stderr_lines: VecDeque::new(),
             #[cfg(target_os = "windows")]
             job_handle,
         }
@@ -162,10 +188,12 @@ impl ProcessManager {
         self.slots.truncate(n);
     }
 
+    #[allow(dead_code)]
     pub fn server_exe_exists(&self) -> bool {
         self.server_exe.exists()
     }
 
+    #[allow(dead_code)]
     pub fn server_exe_path(&self) -> &Path {
         &self.server_exe
     }
@@ -257,6 +285,11 @@ impl ProcessManager {
 
         #[cfg(target_os = "windows")]
         {
+            // SAFETY: SetDllDirectoryW is process-wide. We call it before spawning
+            // the child process so the child inherits the correct DLL search path.
+            // start_slot calls are serialized by the caller (start_all runs sequentially),
+            // so no race condition exists in practice.
+            // TODO: Replace with child-scoped PATH env injection for thread safety.
             unsafe {
                 #[link(name = "kernel32")]
                 unsafe extern "system" {
@@ -281,6 +314,11 @@ impl ProcessManager {
         // Assign child to Job Object — Windows will kill it when launcher exits
         #[cfg(target_os = "windows")]
         if let (Some(job), Some(raw_pid)) = (&self.job_handle, child.id()) {
+            // SAFETY: OpenProcess with a valid PID from a just-spawned child returns
+            // a valid handle or null. AssignProcessToJobObject assigns the child to
+            // our Job Object so it is killed when the launcher exits. CloseHandle is
+            // called on the temporary process handle immediately after assignment;
+            // job.0 remains valid for the lifetime of the ProcessManager.
             unsafe {
                 #[link(name = "kernel32")]
                 unsafe extern "system" {
@@ -349,11 +387,11 @@ impl ProcessManager {
 
         if let Some(pid) = ps.child_pid.take() {
             if pid > 0 {
-                let mut cmd = std::process::Command::new("taskkill");
+                let mut cmd = tokio::process::Command::new("taskkill");
                 cmd.args(["/F", "/PID", &pid.to_string()]);
                 #[cfg(target_os = "windows")]
                 cmd.creation_flags(0x08000000);
-                let _ = cmd.output();
+                let _ = cmd.output().await;
             }
         }
 
@@ -398,6 +436,7 @@ impl ProcessManager {
         self.slots.iter().any(|s| s.is_running())
     }
 
+    #[allow(dead_code)]
     pub fn is_all_running(&self) -> bool {
         !self.slots.is_empty() && self.slots.iter().all(|s| s.is_running())
     }
@@ -496,8 +535,14 @@ impl ProcessManager {
 
         let state = serde_json::json!({ "slots": active });
         let path = LauncherConfig::runtime_state_path();
-        let _ = std::fs::create_dir_all(path.parent().unwrap());
-        std::fs::write(&path, serde_json::to_string_pretty(&state).unwrap_or_default())
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let json = match serde_json::to_string_pretty(&state) {
+            Ok(j) => j,
+            Err(e) => return Err(format!("Failed to serialize runtime state: {e}")),
+        };
+        std::fs::write(&path, json)
             .map_err(|e| format!("Failed to save runtime state: {e}"))
     }
 
@@ -534,14 +579,14 @@ pub fn spawn_log_collector(pm: SharedProcessManager) {
                 Ok(line) => {
                     let mut mgr = pm2.write().await;
                     if line.contains("[stderr]") {
-                        mgr.stderr_lines.push(line.clone());
+                        mgr.stderr_lines.push_back(line.clone());
                         if mgr.stderr_lines.len() > MAX_LOG_LINES {
-                            mgr.stderr_lines.remove(0);
+                            mgr.stderr_lines.pop_front();
                         }
                     } else {
-                        mgr.stdout_lines.push(line.clone());
+                        mgr.stdout_lines.push_back(line.clone());
                         if mgr.stdout_lines.len() > MAX_LOG_LINES {
-                            mgr.stdout_lines.remove(0);
+                            mgr.stdout_lines.pop_front();
                         }
                     }
                 }

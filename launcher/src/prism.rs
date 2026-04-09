@@ -39,6 +39,7 @@ impl Harness {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum HarnessStatus {
     Checking,
@@ -94,6 +95,7 @@ impl PrismReadiness {
     }
 
     /// True when pre-built exe files are available (no Node.js needed)
+    #[allow(dead_code)]
     pub fn has_exe_mode(&self) -> bool {
         self.prism_exe.is_some()
     }
@@ -101,12 +103,12 @@ impl PrismReadiness {
 
 // ─── Endpoint Discovery ──────────────────────────────────────────────────────
 
-pub fn discover_endpoints(config: &crate::config::LauncherConfig) -> (u16, u16) {
+pub fn discover_endpoints(config: &crate::config::LauncherConfig) -> (u16, Option<u16>) {
     let mut text_port = 8080u16;
-    let mut embed_port = 8081u16;
+    let mut embed_port: Option<u16> = None;
     for slot in &config.slots {
         if slot.embedding_mode {
-            embed_port = slot.port;
+            embed_port = Some(slot.port);
         } else {
             text_port = slot.port;
         }
@@ -215,23 +217,22 @@ pub async fn check_prism_readiness(
 
     // Health checks
     let text_url = format!("http://{}:{}/health", host, text_port);
-    let embed_url = format!("http://{}:{}/health", host, embed_port);
 
     let text_ok = reqwest::get(&text_url)
         .await
         .map(|r| r.status().is_success())
         .unwrap_or(false);
 
-    let embedding_ok = reqwest::get(&embed_url)
-        .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false);
-
-    // Embedding dimension test
-    let embedding_dims_ok = if embedding_ok {
-        test_embedding_dims(host, embed_port).await
+    let (embedding_ok, embedding_dims_ok) = if let Some(ep) = embed_port {
+        let embed_url = format!("http://{}:{}/health", host, ep);
+        let ok = reqwest::get(&embed_url)
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+        let dims_ok = if ok { test_embedding_dims(host, ep).await } else { false };
+        (ok, dims_ok)
     } else {
-        false
+        (false, false)
     };
 
     PrismReadiness {
@@ -504,7 +505,7 @@ pub fn build_mcp_entry(
             "PRISM_STORAGE": "local",
             "PRISM_DASHBOARD_PORT": dashboard_port.to_string(),
             "LLAMACPP_TEXT_URL": format!("http://{}:{}/v1", host, text_port),
-            "LLAMACPP_EMBEDDING_URL": format!("http://{}:{}/v1", host, embed_port),
+            "LLAMACPP_EMBEDDING_URL": format!("http://{}:{}/v1", host, embed_port.unwrap_or(8081)),
             "LLAMACPP_TEXT_MODEL": text_alias,
             "LLAMACPP_EMBEDDING_MODEL": embed_alias,
         }
@@ -541,6 +542,7 @@ pub fn build_bonsai_entry(
     })
 }
 
+#[allow(dead_code)]
 pub fn build_bonsai_mcp(repo_root: &std::path::Path) -> Result<String, String> {
     // Check for pre-built exe first
     let (_, bonsai_exe) = find_prebuilt_exes(repo_root);

@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use std::path::Path;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct HfModelResult {
     #[serde(rename = "modelId")]
@@ -13,6 +14,7 @@ pub struct HfModelResult {
     pub likes: u64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct GgufFileInfo {
     pub repo_id: String,
