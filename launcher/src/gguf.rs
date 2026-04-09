@@ -306,27 +306,13 @@ impl ModelMetadata {
                 ));
             }
 
-            // Q1_0 models require CUDA — custom kernels don't exist for Vulkan/CPU
-            if self.requires_cuda {
-                match backend {
-                    "cpu" => return Err(format!(
-                        "{} uses Q1_0 quantization which requires CUDA (NVIDIA GPU). CPU is not supported for this model.",
-                        model_name
-                    )),
-                    "vulkan" => return Err(format!(
-                        "{} uses Q1_0 quantization which requires CUDA (NVIDIA GPU). Vulkan is not supported for this model.",
-                        model_name
-                    )),
-                    "auto" => {
-                        if !available_backends.contains(&"cuda") {
-                            return Err(format!(
-                                "{} uses Q1_0 quantization which requires an NVIDIA GPU with CUDA. No CUDA runtime detected on this system.",
-                                model_name
-                            ));
-                        }
-                    }
-                    _ => {}
-                }
+            // Q1_0 models work on CUDA (optimized) and CPU (reference).
+            // Vulkan backend does not support Q1_0 types.
+            if self.requires_cuda && backend == "vulkan" {
+                return Err(format!(
+                    "{} uses Q1_0 quantization which is not supported on Vulkan. Use CUDA (fastest) or CPU.",
+                    model_name
+                ));
             }
 
             Ok(())
