@@ -1,0 +1,67 @@
+version: '3.8'
+
+# ═══════════════════════════════════════════════════════════════════
+# Prism MCP — Local PostgreSQL Development Stack
+#
+# For users who prefer local PostgreSQL instead of Cloud Supabase.
+# This provides the same database backend with pgvector support.
+#
+# Usage:
+#   docker compose up -d        # Start PostgreSQL + pgvector
+#   docker compose down         # Stop and preserve data
+#   docker compose down -v      # Stop and delete all data
+#
+# After starting, run all migrations in order:
+#   cat supabase/migrations/*.sql | docker compose exec -T db psql -U prism -d prism_mcp
+#
+# Then configure your MCP client to use this local instance:
+#   SUPABASE_URL=http://localhost:3000
+#   SUPABASE_KEY=your-local-anon-key
+#
+# NOTE: This stack uses Supabase's open-source self-hosted images
+# which include PostgREST (the REST API that Prism MCP communicates
+# with). If you prefer raw PostgreSQL without PostgREST, you'll need
+# to modify the server code to use a direct pg client.
+# ═══════════════════════════════════════════════════════════════════
+
+services:
+  # ─── PostgreSQL with pgvector ──────────────────────────────────
+  db:
+    image: supabase/postgres:15.8.1.060
+    container_name: prism-mcp-db
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: prism
+      POSTGRES_PASSWORD: prism_secret_change_me
+      POSTGRES_DB: prism_mcp
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prism -d prism_mcp"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ─── PostgREST — REST API over PostgreSQL ──────────────────────
+  # This provides the same REST API that Supabase Cloud offers.
+  # Prism MCP's supabaseApi.ts communicates with this endpoint.
+  rest:
+    image: postgrest/postgrest:v12.2.3
+    container_name: prism-mcp-rest
+    ports:
+      - "3000:3000"
+    environment:
+      PGRST_DB_URI: postgres://prism:prism_secret_change_me@db:5432/prism_mcp
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: prism
+      PGRST_JWT_SECRET: super-secret-jwt-token-for-local-dev-only-change-in-production
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+    driver: local

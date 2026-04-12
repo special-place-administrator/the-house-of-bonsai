@@ -1,0 +1,73 @@
+# Credentials and secrets
+*.enc
+*.enc.tmp
+*.token.json
+creds.py
+.env
+.env.*
+!.env.example
+
+# MCP runtime config (contains API keys)
+.mcp.json
+
+# Build & environment
+node_modules/
+dist/
+build/
+
+# IDE & OS
+.DS_Store
+.vscode/
+.idea/
+
+# Claude / Gemini local state
+.claude/
+.gemini/
+
+# Temporary outputs
+*.restore.log
+output.png
+gmail_snapshot.json
+
+# Personal / sensitive directories
+secure/
+restore/
+memory/
+!src/memory/
+bcba/
+.agent/
+
+# MCP Registry tokens
+.mcpregistry_github_token
+.mcpregistry_registry_token
+
+# Smithery build artifacts
+.smithery/
+repomix-output.xml
+supabase/.temp/
+examples/langgraph-agent/research_ledger.json
+undefined
+undefined-shm
+undefined-wal
+
+# repomix output
+repomix*.xml
+repomix-output.txt
+repomix-*.txt
+
+# Local Build / DB
+*.tgz
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Local debug/scratch scripts
+test-mcp.js
+test_crdt.js
+test_save.js
+test_save2.js
+upvote.js
+test-results.txt

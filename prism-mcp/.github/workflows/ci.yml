@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [ bcba, main, master, release-** ]
+  pull_request:
+    branches: [ bcba, main, master ]
+
+jobs:
+  build-and-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node-version: [20.x, 22.x]
+      fail-fast: false
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build TypeScript
+        run: npm run build
+
+      - name: Run Full Test Suite
+        run: npm test
+
+      - name: Process-Level CLI Tests
+        run: npx vitest run tests/verification/cli-integration.test.ts

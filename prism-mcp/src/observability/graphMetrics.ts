@@ -1,0 +1,783 @@
+/**
+ * Graph Metrics — In-Memory Observability for Step 3B/4 Flows
+ *
+ * ═══════════════════════════════════════════════════════════════════
+ * PURPOSE:
+ *   Lightweight, zero-dependency metrics collection for graph synthesis,
+ *   test-me flows, and v6.5 cognitive routing.
+ *   All state is in-memory (resets on restart).
+ *
+ * DESIGN:
+ *   - Singleton counters + timestamps for synthesis, test-me, and cognitive
+ *   - Bounded ring buffer (100 entries) for duration p50 approximation
+ *   - Warning flags computed on snapshot (not continuously)
+ *   - Structured JSON log emission via debugLog channel
+ *   - resetGraphMetricsForTests() for test isolation
+ *
+ * METRICS MODEL:
+ *   A) Synthesis: runs, failures, links created, candidates, below-threshold, duration
+ *   B) Test-Me: requests, success, no_api_key, generation_failed, bad_request, duration
+ *   C) Warning flags: quality drift, provider issues, failure rate, cognitive fallback/ambiguity
+ *   D) SLO derivations: success rate, net new links, prune ratio, sweep duration (WS4)
+ *   E) Cognitive (v6.5): intent evaluations, route distribution, ambiguity rate, convergence steps
+ * ═══════════════════════════════════════════════════════════════════
+ */
+
+import { debugLog } from "../utils/logger.js";
+
+// ─── Ring Buffer for Duration Percentiles ────────────────────────
+
+const RING_BUFFER_SIZE = 100;
+
+class DurationBuffer {
+  private buffer: number[] = [];
+  private cursor = 0;
+  private full = false;
+
+  push(ms: number): void {
+    if (this.buffer.length < RING_BUFFER_SIZE) {
+      this.buffer.push(ms);
+    } else {
+      this.buffer[this.cursor] = ms;
+      this.full = true;
+    }
+    this.cursor = (this.cursor + 1) % RING_BUFFER_SIZE;
+  }
+
+  getP50(): number | null {
+    if (this.buffer.length === 0) return null;
+    const sorted = [...this.buffer].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 0
+      ? Math.round((sorted[mid - 1] + sorted[mid]) / 2)
+      : sorted[mid];
+  }
+
+  getCount(): number {
+    return this.full ? RING_BUFFER_SIZE : this.buffer.length;
+  }
+
+  reset(): void {
+    this.buffer = [];
+    this.cursor = 0;
+    this.full = false;
+  }
+}
+
+// ─── Metrics State ───────────────────────────────────────────────
+
+interface SynthesisMetrics {
+  runs_total: number;
+  runs_failed: number;
+  links_created_total: number;
+  candidates_evaluated_total: number;
+  below_threshold_total: number;
+  skipped_links_total: number;
+  last_run_at: string | null;
+  last_status: "ok" | "error" | null;
+  last_links_created: number;
+  last_entries_scanned: number;
+  duration_buffer: DurationBuffer;
+}
+
+interface TestMeMetrics {
+  requests_total: number;
+  success_total: number;
+  no_api_key_total: number;
+  generation_failed_total: number;
+  bad_request_total: number;
+  last_run_at: string | null;
+  last_status: "success" | "no_api_key" | "generation_failed" | "bad_request" | "error" | null;
+  duration_buffer: DurationBuffer;
+}
+
+interface SchedulerSynthesisMetrics {
+  projects_processed_last: number;
+  projects_succeeded_last: number;
+  projects_failed_last: number;
+  retries_last: number;
+  links_created_last: number;
+  duration_ms_last: number;
+  skipped_backpressure_last: number;
+  skipped_cooldown_last: number;
+  skipped_budget_last: number;
+  skipped_backoff_last: number;
+  last_sweep_at: string | null;
+}
+
+interface PruningMetrics {
+  projects_considered_last: number;
+  projects_pruned_last: number;
+  links_scanned_last: number;
+  links_soft_pruned_last: number;
+  min_strength_last: number;
+  duration_ms_last: number;
+  skipped_backpressure_last: number;
+  skipped_cooldown_last: number;
+  skipped_budget_last: number;
+  last_run_at: string | null;
+}
+
+interface CognitiveMetrics {
+  evaluations_total: number;
+  route_auto_total: number;
+  route_clarify_total: number;
+  route_fallback_total: number;
+  ambiguous_total: number;
+  convergence_steps_total: number;
+  last_run_at: string | null;
+  last_route: string | null;
+  last_concept: string | null;
+  last_confidence: number | null;
+  duration_buffer: DurationBuffer;
+}
+
+interface SynapseRuntimeMetrics {
+  evaluations_total: number;
+  nodes_returned_last: number;
+  nodes_discovered_last: number;
+  edges_traversed_last: number;
+  iterations_performed_last: number;
+  max_activation_last: number;
+  last_run_at: string | null;
+  duration_buffer: DurationBuffer;
+}
+
+interface WarningFlags {
+  synthesis_quality_warning: boolean;
+  testme_provider_warning: boolean;
+  synthesis_failure_warning: boolean;
+  cognitive_fallback_rate_warning: boolean;
+  cognitive_ambiguity_rate_warning: boolean;
+}
+
+
+// ─── Sweep Duration State (WS4) ─────────────────────────────────
+
+let sweepDurationMsLast: number = 0;
+let sweepLastAt: string | null = null;
+
+// ─── Singleton State ─────────────────────────────────────────────
+
+let synthesis: SynthesisMetrics = createFreshSynthesisMetrics();
+let testMe: TestMeMetrics = createFreshTestMeMetrics();
+let schedulerSynthesis: SchedulerSynthesisMetrics = createFreshSchedulerMetrics();
+let pruning: PruningMetrics = createFreshPruningMetrics();
+let cognitive: CognitiveMetrics = createFreshCognitiveMetrics();
+let synapse: SynapseRuntimeMetrics = createFreshSynapseMetrics();
+
+function createFreshSynthesisMetrics(): SynthesisMetrics {
+  return {
+    runs_total: 0,
+    runs_failed: 0,
+    links_created_total: 0,
+    candidates_evaluated_total: 0,
+    below_threshold_total: 0,
+    skipped_links_total: 0,
+    last_run_at: null,
+    last_status: null,
+    last_links_created: 0,
+    last_entries_scanned: 0,
+    duration_buffer: new DurationBuffer(),
+  };
+}
+
+function createFreshTestMeMetrics(): TestMeMetrics {
+  return {
+    requests_total: 0,
+    success_total: 0,
+    no_api_key_total: 0,
+    generation_failed_total: 0,
+    bad_request_total: 0,
+    last_run_at: null,
+    last_status: null,
+    duration_buffer: new DurationBuffer(),
+  };
+}
+
+function createFreshSchedulerMetrics(): SchedulerSynthesisMetrics {
+  return {
+    projects_processed_last: 0,
+    projects_succeeded_last: 0,
+    projects_failed_last: 0,
+    retries_last: 0,
+    links_created_last: 0,
+    duration_ms_last: 0,
+    skipped_backpressure_last: 0,
+    skipped_cooldown_last: 0,
+    skipped_budget_last: 0,
+    skipped_backoff_last: 0,
+    last_sweep_at: null,
+  };
+}
+
+function createFreshPruningMetrics(): PruningMetrics {
+  return {
+    projects_considered_last: 0,
+    projects_pruned_last: 0,
+    links_scanned_last: 0,
+    links_soft_pruned_last: 0,
+    min_strength_last: 0,
+    duration_ms_last: 0,
+    skipped_backpressure_last: 0,
+    skipped_cooldown_last: 0,
+    skipped_budget_last: 0,
+    last_run_at: null,
+  };
+}
+
+function createFreshCognitiveMetrics(): CognitiveMetrics {
+  return {
+    evaluations_total: 0,
+    route_auto_total: 0,
+    route_clarify_total: 0,
+    route_fallback_total: 0,
+    ambiguous_total: 0,
+    convergence_steps_total: 0,
+    last_run_at: null,
+    last_route: null,
+    last_concept: null,
+    last_confidence: null,
+    duration_buffer: new DurationBuffer(),
+  };
+}
+
+function createFreshSynapseMetrics(): SynapseRuntimeMetrics {
+  return {
+    evaluations_total: 0,
+    nodes_returned_last: 0,
+    nodes_discovered_last: 0,
+    edges_traversed_last: 0,
+    iterations_performed_last: 0,
+    max_activation_last: 0,
+    last_run_at: null,
+    duration_buffer: new DurationBuffer(),
+  };
+}
+
+
+function emitGraphEvent(event: Record<string, unknown>): void {
+  try {
+    debugLog(JSON.stringify(event));
+  } catch {
+    // Non-critical — don't let logging failures break flows
+  }
+}
+
+// ─── Recording Functions ─────────────────────────────────────────
+
+export interface SynthesisRunData {
+  project: string;
+  status: "ok" | "error";
+  duration_ms: number;
+  entries_scanned?: number;
+  candidates?: number;
+  below_threshold?: number;
+  new_links?: number;
+  skipped_links?: number;
+  error?: string;
+}
+
+export function recordSynthesisRun(data: SynthesisRunData): void {
+  const now = new Date().toISOString();
+  synthesis.runs_total++;
+  synthesis.last_run_at = now;
+  synthesis.last_status = data.status;
+  synthesis.duration_buffer.push(data.duration_ms);
+
+  if (data.status === "error") {
+    synthesis.runs_failed++;
+  } else {
+    synthesis.links_created_total += data.new_links || 0;
+    synthesis.candidates_evaluated_total += data.candidates || 0;
+    synthesis.below_threshold_total += data.below_threshold || 0;
+    synthesis.skipped_links_total += data.skipped_links || 0;
+    synthesis.last_links_created = data.new_links || 0;
+    synthesis.last_entries_scanned = data.entries_scanned || 0;
+  }
+
+  emitGraphEvent({
+    event: "graph_synthesis_run",
+    project: data.project,
+    status: data.status,
+    duration_ms: data.duration_ms,
+    entries_scanned: data.entries_scanned ?? 0,
+    candidates: data.candidates ?? 0,
+    below_threshold: data.below_threshold ?? 0,
+    new_links: data.new_links ?? 0,
+    ...(data.error ? { error: data.error } : {}),
+  });
+}
+
+export interface TestMeRequestData {
+  project: string;
+  node_id: string;
+  status: "success" | "no_api_key" | "generation_failed" | "bad_request" | "error";
+  duration_ms: number;
+}
+
+export function recordTestMeRequest(data: TestMeRequestData): void {
+  const now = new Date().toISOString();
+  testMe.requests_total++;
+  testMe.last_run_at = now;
+  testMe.last_status = data.status;
+  testMe.duration_buffer.push(data.duration_ms);
+
+  switch (data.status) {
+    case "success":
+      testMe.success_total++;
+      break;
+    case "no_api_key":
+      testMe.no_api_key_total++;
+      break;
+    case "generation_failed":
+      testMe.generation_failed_total++;
+      break;
+    case "bad_request":
+      testMe.bad_request_total++;
+      break;
+    // "error" increments only requests_total (catch-all)
+  }
+
+  emitGraphEvent({
+    event: "graph_testme_request",
+    project: data.project,
+    node_id: data.node_id,
+    status: data.status,
+    duration_ms: data.duration_ms,
+  });
+}
+
+export interface SchedulerSynthesisData {
+  projects_processed: number;
+  projects_succeeded: number;
+  projects_failed: number;
+  retries: number;
+  links_created: number;
+  duration_ms: number;
+  skipped_backpressure: number;
+  skipped_cooldown: number;
+  skipped_budget: number;
+  skipped_backoff: number;
+}
+
+export function recordSchedulerSynthesis(data: SchedulerSynthesisData): void {
+  const now = new Date().toISOString();
+  schedulerSynthesis.projects_processed_last = data.projects_processed;
+  schedulerSynthesis.projects_succeeded_last = data.projects_succeeded;
+  schedulerSynthesis.projects_failed_last = data.projects_failed;
+  schedulerSynthesis.retries_last = data.retries;
+  schedulerSynthesis.links_created_last = data.links_created;
+  schedulerSynthesis.duration_ms_last = data.duration_ms;
+  schedulerSynthesis.skipped_backpressure_last = data.skipped_backpressure;
+  schedulerSynthesis.skipped_cooldown_last = data.skipped_cooldown;
+  schedulerSynthesis.skipped_budget_last = data.skipped_budget;
+  schedulerSynthesis.skipped_backoff_last = data.skipped_backoff;
+  schedulerSynthesis.last_sweep_at = now;
+
+  emitGraphEvent({
+    event: "graph_scheduler_synthesis",
+    projects_processed: data.projects_processed,
+    projects_succeeded: data.projects_succeeded,
+    projects_failed: data.projects_failed,
+    retries: data.retries,
+    links_created: data.links_created,
+    duration_ms: data.duration_ms,
+    skipped_backpressure: data.skipped_backpressure,
+    skipped_cooldown: data.skipped_cooldown,
+    skipped_budget: data.skipped_budget,
+    skipped_backoff: data.skipped_backoff,
+  });
+}
+
+export interface PruningRunData {
+  projects_considered: number;
+  projects_pruned: number;
+  links_scanned: number;
+  links_soft_pruned: number;
+  min_strength: number;
+  duration_ms: number;
+  skipped_backpressure: number;
+  skipped_cooldown: number;
+  skipped_budget: number;
+}
+
+export function recordPruningRun(data: PruningRunData): void {
+  const now = new Date().toISOString();
+  pruning.projects_considered_last = data.projects_considered;
+  pruning.projects_pruned_last = data.projects_pruned;
+  pruning.links_scanned_last = data.links_scanned;
+  pruning.links_soft_pruned_last = data.links_soft_pruned;
+  pruning.min_strength_last = data.min_strength;
+  pruning.duration_ms_last = data.duration_ms;
+  pruning.skipped_backpressure_last = data.skipped_backpressure;
+  pruning.skipped_cooldown_last = data.skipped_cooldown;
+  pruning.skipped_budget_last = data.skipped_budget;
+  pruning.last_run_at = now;
+
+  emitGraphEvent({
+    event: "graph_prune_run",
+    projects_considered: data.projects_considered,
+    projects_pruned: data.projects_pruned,
+    links_scanned: data.links_scanned,
+    links_soft_pruned: data.links_soft_pruned,
+    min_strength: data.min_strength,
+    duration_ms: data.duration_ms,
+    skipped_backpressure: data.skipped_backpressure,
+    skipped_cooldown: data.skipped_cooldown,
+    skipped_budget: data.skipped_budget,
+  });
+}
+
+// ─── Sweep Duration Recording (WS4) ─────────────────────────────
+
+export function recordSweepDuration(duration_ms: number): void {
+  sweepDurationMsLast = duration_ms;
+  sweepLastAt = new Date().toISOString();
+
+  emitGraphEvent({
+    event: "graph_sweep_duration",
+    duration_ms,
+  });
+}
+
+// ─── Cognitive Route Recording (v6.5) ────────────────────────────
+
+export interface CognitiveRouteData {
+  project: string;
+  route: string;
+  concept: string | null;
+  confidence: number;
+  distance: number;
+  ambiguous: boolean;
+  steps: number;
+  duration_ms: number;
+}
+
+export function recordCognitiveRoute(data: CognitiveRouteData): void {
+  const now = new Date().toISOString();
+  cognitive.evaluations_total++;
+  cognitive.last_run_at = now;
+  cognitive.last_route = data.route;
+  cognitive.last_concept = data.concept;
+  cognitive.last_confidence = data.confidence;
+  cognitive.duration_buffer.push(data.duration_ms);
+  cognitive.convergence_steps_total += data.steps;
+
+  if (data.ambiguous) {
+    cognitive.ambiguous_total++;
+  }
+
+  // Route distribution — match ActionRoute enum values
+  if (data.route === "ACTION_AUTO_ROUTE") {
+    cognitive.route_auto_total++;
+  } else if (data.route === "ACTION_CLARIFY") {
+    cognitive.route_clarify_total++;
+  } else if (data.route === "ACTION_FALLBACK") {
+    cognitive.route_fallback_total++;
+  }
+
+  emitGraphEvent({
+    event: "cognitive_route_evaluation",
+    project: data.project,
+    route: data.route,
+    concept: data.concept,
+    confidence: data.confidence,
+    distance: data.distance,
+    ambiguous: data.ambiguous,
+    steps: data.steps,
+    duration_ms: data.duration_ms,
+  });
+}
+
+// ─── Synapse Telemetry Recording (v8.0) ──────────────────────────
+
+export interface SynapseRunData {
+  nodesReturned: number;
+  nodesDiscovered: number;
+  edgesTraversed: number;
+  iterationsPerformed: number;
+  maxActivationEnergy: number;
+  avgActivationEnergy: number;
+  durationMs: number;
+}
+
+export function recordSynapseTelemetry(data: SynapseRunData): void {
+  const now = new Date().toISOString();
+  synapse.evaluations_total++;
+  synapse.last_run_at = now;
+  synapse.nodes_returned_last = data.nodesReturned;
+  synapse.nodes_discovered_last = data.nodesDiscovered;
+  synapse.edges_traversed_last = data.edgesTraversed;
+  synapse.iterations_performed_last = data.iterationsPerformed;
+  synapse.max_activation_last = data.maxActivationEnergy;
+  synapse.duration_buffer.push(data.durationMs);
+
+  emitGraphEvent({
+    event: "synapse_propagation",
+    nodes_returned: data.nodesReturned,
+    nodes_discovered: data.nodesDiscovered,
+    edges_traversed: data.edgesTraversed,
+    iterations: data.iterationsPerformed,
+    max_activation: data.maxActivationEnergy,
+    duration_ms: data.durationMs,
+  });
+}
+
+// ─── Warning Flag Computation ────────────────────────────────────
+
+function computeWarningFlags(): WarningFlags {
+  // Quality warning: >85% of candidates are below threshold (min 50 candidates)
+  const synthesis_quality_warning =
+    synthesis.candidates_evaluated_total >= 50 &&
+    synthesis.below_threshold_total / synthesis.candidates_evaluated_total > 0.85;
+
+  // Provider warning: test-me has been called but never succeeded
+  const testme_provider_warning =
+    testMe.no_api_key_total > 0 && testMe.success_total === 0;
+
+  // Failure rate warning: >20% of synthesis runs failed (min 5 runs)
+  const synthesis_failure_warning =
+    synthesis.runs_total >= 5 &&
+    synthesis.runs_failed / synthesis.runs_total > 0.2;
+
+  // Cognitive fallback rate warning: >30% routes go to FALLBACK (min 10 evaluations)
+  const cognitive_fallback_rate_warning =
+    cognitive.evaluations_total >= 10 &&
+    cognitive.route_fallback_total / cognitive.evaluations_total > 0.3;
+
+  // Cognitive ambiguity rate warning: >40% evaluations are ambiguous (min 10 evaluations)
+  const cognitive_ambiguity_rate_warning =
+    cognitive.evaluations_total >= 10 &&
+    cognitive.ambiguous_total / cognitive.evaluations_total > 0.4;
+
+  return {
+    synthesis_quality_warning,
+    testme_provider_warning,
+    synthesis_failure_warning,
+    cognitive_fallback_rate_warning,
+    cognitive_ambiguity_rate_warning,
+  };
+}
+
+// ─── SLO Derivation (WS4) ────────────────────────────────────────
+
+function computeSloMetrics(): SloMetrics {
+  // synthesis_success_rate: null when no runs, otherwise (total - failed) / total
+  const synthesis_success_rate =
+    synthesis.runs_total > 0
+      ? parseFloat(((synthesis.runs_total - synthesis.runs_failed) / synthesis.runs_total).toFixed(4))
+      : null;
+
+  // net_new_links_last_sweep: synthesis links created minus pruned links in last sweep
+  const net_new_links_last_sweep =
+    synthesis.last_links_created - pruning.links_soft_pruned_last;
+
+  // prune_ratio_last_sweep: soft-pruned / scanned (0 when no scans)
+  const prune_ratio_last_sweep =
+    pruning.links_scanned_last > 0
+      ? parseFloat((pruning.links_soft_pruned_last / pruning.links_scanned_last).toFixed(4))
+      : 0;
+
+  // scheduler_sweep_duration_ms_last: recorded by backgroundScheduler
+  return {
+    synthesis_success_rate,
+    net_new_links_last_sweep,
+    prune_ratio_last_sweep,
+    scheduler_sweep_duration_ms_last: sweepDurationMsLast,
+  };
+}
+
+// ─── Snapshot ────────────────────────────────────────────────────
+
+interface SloMetrics {
+  synthesis_success_rate: number | null;
+  net_new_links_last_sweep: number;
+  prune_ratio_last_sweep: number;
+  scheduler_sweep_duration_ms_last: number;
+}
+
+export interface GraphMetricsSnapshot {
+  synthesis: {
+    runs_total: number;
+    runs_failed: number;
+    links_created_total: number;
+    candidates_evaluated_total: number;
+    below_threshold_total: number;
+    skipped_links_total: number;
+    last_run_at: string | null;
+    last_status: string | null;
+    last_links_created: number;
+    last_entries_scanned: number;
+    duration_p50_ms: number | null;
+  };
+  testMe: {
+    requests_total: number;
+    success_total: number;
+    no_api_key_total: number;
+    generation_failed_total: number;
+    bad_request_total: number;
+    last_run_at: string | null;
+    last_status: string | null;
+    duration_p50_ms: number | null;
+  };
+  scheduler: {
+    projects_processed_last: number;
+    projects_succeeded_last: number;
+    projects_failed_last: number;
+    retries_last: number;
+    links_created_last: number;
+    duration_ms_last: number;
+    skipped_backpressure_last: number;
+    skipped_cooldown_last: number;
+    skipped_budget_last: number;
+    skipped_backoff_last: number;
+    last_sweep_at: string | null;
+  };
+  pruning: {
+    projects_considered_last: number;
+    projects_pruned_last: number;
+    links_scanned_last: number;
+    links_soft_pruned_last: number;
+    min_strength_last: number;
+    duration_ms_last: number;
+    skipped_backpressure_last: number;
+    skipped_cooldown_last: number;
+    skipped_budget_last: number;
+    last_run_at: string | null;
+  };
+  cognitive: {
+    evaluations_total: number;
+    route_auto_total: number;
+    route_clarify_total: number;
+    route_fallback_total: number;
+    ambiguous_total: number;
+    convergence_steps_total: number;
+    median_convergence_steps: number | null;
+    ambiguity_rate: number | null;
+    fallback_rate: number | null;
+    last_run_at: string | null;
+    last_route: string | null;
+    last_concept: string | null;
+    last_confidence: number | null;
+    duration_p50_ms: number | null;
+  };
+  synapse: {
+    evaluations_total: number;
+    nodes_returned_last: number;
+    nodes_discovered_last: number;
+    edges_traversed_last: number;
+    iterations_performed_last: number;
+    max_activation_last: number;
+    last_run_at: string | null;
+    duration_p50_ms: number | null;
+  };
+  slo: SloMetrics;
+  warnings: WarningFlags;
+}
+
+export function getGraphMetricsSnapshot(): GraphMetricsSnapshot {
+  // Derived cognitive rates
+  const cogEvalTotal = cognitive.evaluations_total;
+  const ambiguity_rate = cogEvalTotal > 0
+    ? parseFloat((cognitive.ambiguous_total / cogEvalTotal).toFixed(4))
+    : null;
+  const fallback_rate = cogEvalTotal > 0
+    ? parseFloat((cognitive.route_fallback_total / cogEvalTotal).toFixed(4))
+    : null;
+  const median_convergence_steps = cogEvalTotal > 0
+    ? parseFloat((cognitive.convergence_steps_total / cogEvalTotal).toFixed(2))
+    : null;
+
+  return {
+    synthesis: {
+      runs_total: synthesis.runs_total,
+      runs_failed: synthesis.runs_failed,
+      links_created_total: synthesis.links_created_total,
+      candidates_evaluated_total: synthesis.candidates_evaluated_total,
+      below_threshold_total: synthesis.below_threshold_total,
+      skipped_links_total: synthesis.skipped_links_total,
+      last_run_at: synthesis.last_run_at,
+      last_status: synthesis.last_status,
+      last_links_created: synthesis.last_links_created,
+      last_entries_scanned: synthesis.last_entries_scanned,
+      duration_p50_ms: synthesis.duration_buffer.getP50(),
+    },
+    testMe: {
+      requests_total: testMe.requests_total,
+      success_total: testMe.success_total,
+      no_api_key_total: testMe.no_api_key_total,
+      generation_failed_total: testMe.generation_failed_total,
+      bad_request_total: testMe.bad_request_total,
+      last_run_at: testMe.last_run_at,
+      last_status: testMe.last_status,
+      duration_p50_ms: testMe.duration_buffer.getP50(),
+    },
+    scheduler: {
+      projects_processed_last: schedulerSynthesis.projects_processed_last,
+      projects_succeeded_last: schedulerSynthesis.projects_succeeded_last,
+      projects_failed_last: schedulerSynthesis.projects_failed_last,
+      retries_last: schedulerSynthesis.retries_last,
+      links_created_last: schedulerSynthesis.links_created_last,
+      duration_ms_last: schedulerSynthesis.duration_ms_last,
+      skipped_backpressure_last: schedulerSynthesis.skipped_backpressure_last,
+      skipped_cooldown_last: schedulerSynthesis.skipped_cooldown_last,
+      skipped_budget_last: schedulerSynthesis.skipped_budget_last,
+      skipped_backoff_last: schedulerSynthesis.skipped_backoff_last,
+      last_sweep_at: schedulerSynthesis.last_sweep_at,
+    },
+    pruning: {
+      projects_considered_last: pruning.projects_considered_last,
+      projects_pruned_last: pruning.projects_pruned_last,
+      links_scanned_last: pruning.links_scanned_last,
+      links_soft_pruned_last: pruning.links_soft_pruned_last,
+      min_strength_last: pruning.min_strength_last,
+      duration_ms_last: pruning.duration_ms_last,
+      skipped_backpressure_last: pruning.skipped_backpressure_last,
+      skipped_cooldown_last: pruning.skipped_cooldown_last,
+      skipped_budget_last: pruning.skipped_budget_last,
+      last_run_at: pruning.last_run_at,
+    },
+    cognitive: {
+      evaluations_total: cognitive.evaluations_total,
+      route_auto_total: cognitive.route_auto_total,
+      route_clarify_total: cognitive.route_clarify_total,
+      route_fallback_total: cognitive.route_fallback_total,
+      ambiguous_total: cognitive.ambiguous_total,
+      convergence_steps_total: cognitive.convergence_steps_total,
+      median_convergence_steps,
+      ambiguity_rate,
+      fallback_rate,
+      last_run_at: cognitive.last_run_at,
+      last_route: cognitive.last_route,
+      last_concept: cognitive.last_concept,
+      last_confidence: cognitive.last_confidence,
+      duration_p50_ms: cognitive.duration_buffer.getP50(),
+    },
+    synapse: {
+      evaluations_total: synapse.evaluations_total,
+      nodes_returned_last: synapse.nodes_returned_last,
+      nodes_discovered_last: synapse.nodes_discovered_last,
+      edges_traversed_last: synapse.edges_traversed_last,
+      iterations_performed_last: synapse.iterations_performed_last,
+      max_activation_last: synapse.max_activation_last,
+      last_run_at: synapse.last_run_at,
+      duration_p50_ms: synapse.duration_buffer.getP50(),
+    },
+    slo: computeSloMetrics(),
+    warnings: computeWarningFlags(),
+  };
+}
+
+// ─── Test Helper ─────────────────────────────────────────────────
+
+export function resetGraphMetricsForTests(): void {
+  synthesis = createFreshSynthesisMetrics();
+  testMe = createFreshTestMeMetrics();
+  schedulerSynthesis = createFreshSchedulerMetrics();
+  pruning = createFreshPruningMetrics();
+  cognitive = createFreshCognitiveMetrics();
+  synapse = createFreshSynapseMetrics();
+  sweepDurationMsLast = 0;
+  sweepLastAt = null;
+}
