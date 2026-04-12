@@ -411,6 +411,12 @@ impl LauncherConfig {
             }
         }
 
+        // Migrate old turbo* cache type values to rq*
+        for slot in &mut cfg.slots {
+            slot.cache_type_k = migrate_cache_type(&slot.cache_type_k);
+            slot.cache_type_v = migrate_cache_type(&slot.cache_type_v);
+        }
+
         // Re-detect capabilities on every load — ensures new detection
         // logic applies to previously saved configs.
         cfg.redetect_capabilities();
@@ -478,5 +484,17 @@ impl LauncherConfig {
         if self.slots.len() > 1 && index < self.slots.len() {
             self.slots.remove(index);
         }
+    }
+}
+
+/// Migrate old TurboQuant cache type strings to RotorQuant equivalents.
+fn migrate_cache_type(ct: &str) -> String {
+    match ct {
+        "turbo2" => "rq2".into(),
+        "turbo3" => "rq3".into(),
+        "turbo4" => "rq4".into(),
+        "turbo3_tcq" => "rq3-iso".into(),
+        "turbo2_tcq" => "rq4-iso".into(),
+        other => other.into(),
     }
 }
