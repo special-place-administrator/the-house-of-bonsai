@@ -56,7 +56,7 @@ Merge Prism's web dashboard with Bonsai model management:
 - llama-server exposes **OpenAI-compatible API** (`/v1/chat/completions`, `/v1/embeddings`)
 - Prism's LLM abstraction: `src/utils/llm/factory.ts` → `getLLMProvider()` → adapters (gemini, openai, anthropic, voyage, llamacpp)
 - Prism dashboard: `src/dashboard/ui.ts` (inline HTML in TypeScript), served on port 3333
-- Prism storage: SQLite + FTS5 + TurboQuant locally, pgvector on Supabase (cloud)
+- Prism storage: SQLite + FTS5 + RotorQuant locally, pgvector on Supabase (cloud)
 - Embedding dimension contract: exactly **768 dims** (nomic-embed-text-v2-moe outputs 768 natively)
 - GPU: RTX 5090 (32GB VRAM)
 

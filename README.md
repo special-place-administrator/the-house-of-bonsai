@@ -20,7 +20,7 @@ A multi-model inference platform with a native desktop launcher. Run any GGUF mo
 | **Multi-Backend GPU** | CUDA (NVIDIA), Vulkan (AMD/Intel/NVIDIA), CPU — per-model backend selection, auto-detected at build time |
 | **Q1_0 CUDA Kernels** | Custom 1-bit quantization support for PrismML Bonsai-8B — not available in standard llama.cpp or Ollama |
 | **Auto-Tune** | Detects GPU/RAM/CPU, reads model architecture from GGUF, calculates optimal context window, KV cache, batch size per model |
-| **TurboQuant KV Cache** | Compressed KV caches (turbo2/turbo3/turbo4) for additional VRAM savings |
+| **RotorQuant KV Cache** | Compressed KV caches (rq2/rq3/rq4) using Givens 2D rotation — 10x smaller rotation parameters than WHT. Additional VRAM savings |
 
 ---
 
@@ -38,7 +38,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
 Then launch:
 
 ```powershell
-launcher\target\release\turboquant-launcher.exe
+launcher\target\release\the-house-of-bonsai.exe
 ```
 
 Select a model, click **Start**, then **Chat**. Add more models with **+ Add Model**.
@@ -147,7 +147,7 @@ the-house-of-bonsai/
       resources.rs      # GPU vendor detection, multi-backend, auto-tune
     assets/
       style.css         # Dark theme with model card layout
-  llama-cpp/            # TurboQuant llama.cpp fork (git submodule)
+  llama-cpp/            # RotorQuant llama.cpp fork (git submodule)
   models/               # Downloaded GGUF models (gitignored)
   patches/              # Q1_0 CUDA patch for vanilla llama.cpp
   scripts/              # Setup and download scripts
@@ -179,9 +179,9 @@ When you select a model, the launcher reads its GGUF header to extract:
 
 This replaces guesswork with model-specific optimization.
 
-### TurboQuant KV Cache
+### RotorQuant KV Cache
 
-The launcher supports TurboQuant compressed KV caches (`turbo2` / `turbo3` / `turbo4`) for additional VRAM savings on the runtime context window. Auto-tune selects the best setting for your GPU.
+The launcher supports RotorQuant compressed KV caches (`rq2` / `rq3` / `rq4`) for additional VRAM savings on the runtime context window. RotorQuant uses PlanarQuant (Givens 2D rotation) instead of Walsh-Hadamard Transform, requiring only 128 rotation floats vs 16,384 for WHT -- 10x smaller rotation parameters with the same compression ratio and accuracy. Auto-tune selects the best setting for your GPU.
 
 ---
 
@@ -218,7 +218,7 @@ echo $env:VULKAN_SDK # Vulkan SDK (optional)
 > **Rust nightly is required.** Run `rustup install nightly && rustup default nightly`. The project uses Rust 2024 edition features.
 
 > [!WARNING]
-> **MSVC M_PI compatibility.** If the build fails with `M_PI undeclared`, the fix is already applied in the submodule. If building from vanilla llama.cpp, add `#ifndef M_PI / #define M_PI 3.14159265358979323846 / #endif` after the includes in `ggml-turbo-quant.c`.
+> **MSVC M_PI compatibility.** If the build fails with `M_PI undeclared`, the fix is already applied in the submodule. If building from vanilla llama.cpp, add `#ifndef M_PI / #define M_PI 3.14159265358979323846 / #endif` after the includes in `ggml-rotor-quant.c`.
 
 ---
 
@@ -265,7 +265,7 @@ The build script auto-detects available GPU SDKs and builds accordingly:
 ### Step 4 — Launch
 
 ```powershell
-launcher\target\release\turboquant-launcher.exe
+launcher\target\release\the-house-of-bonsai.exe
 ```
 
 In the launcher UI:
@@ -317,7 +317,7 @@ In the launcher UI:
 
 - **[PrismML](https://prismml.com)** — creators of Bonsai-8B, the Q1_0 quantization format, and the 1-bit inference research. CUDA kernels derived from their work.
 - **[llama.cpp](https://github.com/ggml-org/llama.cpp)** (ggml-org) — the foundational C/C++ inference engine.
-- **[TurboQuant llama.cpp](https://github.com/spiritbuun/llama-cpp-turboquant-cuda)** (spiritbuun) — TurboQuant KV cache compression fork extended with Q1_0 CUDA support.
+- **[RotorQuant llama.cpp](https://github.com/spiritbuun/llama-cpp-turboquant-cuda)** (spiritbuun) — RotorQuant KV cache compression fork (PlanarQuant / Givens rotation) extended with Q1_0 CUDA support.
 - **[Dioxus 0.7](https://dioxuslabs.com)** — Rust native desktop UI framework.
 - **[Qwen3](https://huggingface.co/Qwen)** (Alibaba) — base architecture for Bonsai-8B.
 
@@ -330,7 +330,7 @@ In the launcher UI:
 You may inspect, study, and use the source code for noncommercial purposes, but commercial use is prohibited unless separately licensed.
 
 **Third-party components** retain their original licenses:
-- llama.cpp / TurboQuant fork — MIT License
+- llama.cpp / RotorQuant fork — MIT License
 - Bonsai-8B model — Apache 2.0 (PrismML)
 - nomic-embed-text-v2-moe — Apache 2.0 (Nomic AI)
 - Dioxus — MIT / Apache 2.0
