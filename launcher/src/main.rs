@@ -580,7 +580,7 @@ fn ModelCard(
                                         s.cache_type_k = "f16".into();
                                         s.cache_type_v = "f16".into();
                                         s.flash_attention = "off".into();
-                                        s.turbo_layer_adaptive = "off".into();
+                                        s.rq_layer_adaptive = "off".into();
                                         s.parallel = "4".into();
                                     } else {
                                         s.embedding_mode = false;
@@ -678,7 +678,7 @@ fn ModelCard(
                 SlotSelectField {
                     label: "Cache K",
                     value: slot.cache_type_k.clone(),
-                    options: vec!["f16","q8_0","turbo2","turbo3","turbo4"],
+                    options: vec!["f16","q8_0","rq2","rq3","rq4","rq3-iso","rq4-iso"],
                     on_change: move |v: String| {
                         if let Some(s) = config.write().slots.get_mut(index) { s.cache_type_k = v; }
                         save();
@@ -687,7 +687,7 @@ fn ModelCard(
                 SlotSelectField {
                     label: "Cache V",
                     value: slot.cache_type_v.clone(),
-                    options: vec!["f16","q8_0","turbo2","turbo3","turbo4"],
+                    options: vec!["f16","q8_0","rq2","rq3","rq4","rq3-iso","rq4-iso"],
                     on_change: move |v: String| {
                         if let Some(s) = config.write().slots.get_mut(index) { s.cache_type_v = v; }
                         save();
@@ -752,10 +752,10 @@ fn ModelCard(
                 }
                 SlotSelectField {
                     label: "Layer Adapt.",
-                    value: slot.turbo_layer_adaptive.clone(),
+                    value: slot.rq_layer_adaptive.clone(),
                     options: vec!["off","1","5"],
                     on_change: move |v: String| {
-                        if let Some(s) = config.write().slots.get_mut(index) { s.turbo_layer_adaptive = v; }
+                        if let Some(s) = config.write().slots.get_mut(index) { s.rq_layer_adaptive = v; }
                         save();
                     },
                 }
@@ -945,7 +945,7 @@ fn ModelCard(
                                                                     s.cache_type_k = "f16".into();
                                                                     s.cache_type_v = "f16".into();
                                                                     s.flash_attention = "off".into();
-                                                                    s.turbo_layer_adaptive = "off".into();
+                                                                    s.rq_layer_adaptive = "off".into();
                                                                     s.parallel = "4".into();
                                                                 }
                                                             }

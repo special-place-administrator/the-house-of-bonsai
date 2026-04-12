@@ -279,8 +279,8 @@ impl ProcessManager {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
-        if slot_config.turbo_layer_adaptive != "off" {
-            cmd.env("TURBO_LAYER_ADAPTIVE", &slot_config.turbo_layer_adaptive);
+        if slot_config.rq_layer_adaptive != "off" {
+            cmd.env("RQ_LAYER_ADAPTIVE", &slot_config.rq_layer_adaptive);
         }
 
         #[cfg(target_os = "windows")]

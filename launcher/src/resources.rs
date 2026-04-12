@@ -150,8 +150,8 @@ impl SystemResources {
             let remaining = budget_mb.saturating_sub(model_mem);
 
             // -- Cache type --
-            // CPU/Vulkan: turbo cache types require CUDA kernels, fall back to f16
-            // CUDA: turbo3 for quality, turbo2 if tight on VRAM
+            // CPU/Vulkan: RQ cache types require CUDA kernels, fall back to f16
+            // CUDA: rq3 for quality, rq2 if tight on VRAM
             if is_cpu {
                 slot.cache_type_k = "f16".into();
                 slot.cache_type_v = "f16".into();
@@ -159,23 +159,23 @@ impl SystemResources {
                 slot.cache_type_k = "f16".into();
                 slot.cache_type_v = "f16".into();
             } else if remaining > model_mem * 2 {
-                slot.cache_type_k = "turbo3".into();
-                slot.cache_type_v = "turbo3".into();
+                slot.cache_type_k = "rq3".into();
+                slot.cache_type_v = "rq3".into();
             } else if remaining > model_mem {
-                slot.cache_type_k = "turbo3".into();
-                slot.cache_type_v = "turbo3".into();
+                slot.cache_type_k = "rq3".into();
+                slot.cache_type_v = "rq3".into();
             } else {
-                slot.cache_type_k = "turbo2".into();
-                slot.cache_type_v = "turbo2".into();
+                slot.cache_type_k = "rq2".into();
+                slot.cache_type_v = "rq2".into();
             }
 
             // -- Context size --
             let bytes_per_elem = match slot.cache_type_k.as_str() {
                 "f16" => 2.0_f64,
                 "q8_0" => 1.0,
-                "turbo2" => 0.25,
-                "turbo3" => 0.375,
-                "turbo4" => 0.5,
+                "rq2" => 0.25,
+                "rq3" => 0.375,
+                "rq4" => 0.5,
                 _ => 2.0,
             };
 
@@ -247,11 +247,11 @@ impl SystemResources {
 
             // -- Layer adaptive --
             // Off for CPU/embedding (no KV cache compression benefit)
-            // On (1) for GPU text models with turbo cache
+            // On (1) for GPU text models with RQ cache
             if is_embedding || is_cpu {
-                slot.turbo_layer_adaptive = "off".into();
+                slot.rq_layer_adaptive = "off".into();
             } else {
-                slot.turbo_layer_adaptive = "1".into();
+                slot.rq_layer_adaptive = "1".into();
             }
 
             // -- GPU layers --

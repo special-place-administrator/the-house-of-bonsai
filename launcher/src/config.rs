@@ -26,8 +26,8 @@ pub struct ModelSlot {
     pub cache_type_k: String,
     #[serde(default = "default_cache_type")]
     pub cache_type_v: String,
-    #[serde(default = "default_layer_adaptive")]
-    pub turbo_layer_adaptive: String,
+    #[serde(default = "default_layer_adaptive", alias = "turboLayerAdaptive")]
+    pub rq_layer_adaptive: String,
     #[serde(default = "default_parallel")]
     pub parallel: String,
     #[serde(default = "default_batch_size")]
@@ -63,7 +63,7 @@ impl ModelSlot {
             flash_attention: default_flash_attention(),
             cache_type_k: default_cache_type(),
             cache_type_v: default_cache_type(),
-            turbo_layer_adaptive: default_layer_adaptive(),
+            rq_layer_adaptive: default_layer_adaptive(),
             parallel: default_parallel(),
             batch_size: default_batch_size(),
             ubatch_size: default_ubatch_size(),
@@ -103,13 +103,13 @@ impl ModelSlot {
             let mut extra_flags: Vec<String> = Vec::new();
 
             let safe_cache = |ct: &str| -> String {
-                if ct.starts_with("turbo") { "f16".into() } else { ct.to_string() }
+                if ct.starts_with("rq") { "f16".into() } else { ct.to_string() }
             };
 
             match self.backend.as_str() {
                 "cpu" => {
                     effective_gpu_layers = "0".into();
-                    // CPU has no CUDA kernels — turbo cache types crash or are unsupported
+                    // CPU has no CUDA kernels — RQ cache types crash or are unsupported
                     effective_cache_k = safe_cache(&self.cache_type_k);
                     effective_cache_v = safe_cache(&self.cache_type_v);
                     effective_context = self.context_size.clone();
@@ -119,7 +119,7 @@ impl ModelSlot {
                 }
                 "vulkan" => {
                     effective_gpu_layers = self.gpu_layers.clone();
-                    // Vulkan doesn't support turbo SET_ROWS op — fall back to f16
+                    // Vulkan doesn't support RQ SET_ROWS op — fall back to f16
                     effective_cache_k = safe_cache(&self.cache_type_k);
                     effective_cache_v = safe_cache(&self.cache_type_v);
                     effective_context = self.context_size.clone();
@@ -233,8 +233,8 @@ struct LegacyFields {
     cache_type_k: String,
     #[serde(default = "default_cache_type")]
     cache_type_v: String,
-    #[serde(default = "default_layer_adaptive")]
-    turbo_layer_adaptive: String,
+    #[serde(default = "default_layer_adaptive", alias = "turboLayerAdaptive")]
+    rq_layer_adaptive: String,
     #[serde(default = "default_parallel")]
     parallel: String,
     #[serde(default = "default_batch_size")]
@@ -394,7 +394,7 @@ impl LauncherConfig {
                     flash_attention: legacy.flash_attention,
                     cache_type_k: legacy.cache_type_k,
                     cache_type_v: legacy.cache_type_v,
-                    turbo_layer_adaptive: legacy.turbo_layer_adaptive,
+                    rq_layer_adaptive: legacy.rq_layer_adaptive,
                     parallel: legacy.parallel,
                     batch_size: legacy.batch_size,
                     ubatch_size: legacy.ubatch_size,
